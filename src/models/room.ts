@@ -2209,6 +2209,26 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
         this.on(ThreadEvent.NewReply, this.onThreadReply);
         this.on(ThreadEvent.Update, this.onThreadUpdate);
         this.on(ThreadEvent.Delete, this.onThreadDelete);
+
+        // Local-timeline rescue: events that already sit in this room's main
+        // timeline but were never classified as thread events (because they
+        // arrived before `Thread.setServerSideSupport` was set, or because
+        // the homeserver lacks server-side thread support so the bundled
+        // relations the server-driven path expects never arrived) won't be
+        // visible via `getThreads()` otherwise. Run them through the regular
+        // thread-processing pipeline so the SDK and consumers see a consistent
+        // view of the room. `processThreadedEvents` is idempotent: events that
+        // are already in the right thread will be deduplicated by the
+        // underlying timeline-set, and non-thread events are filtered out
+        // inside `eventShouldLiveIn`.
+        const localThreadCandidates = this.getUnfilteredTimelineSet()
+            .getLiveTimeline()
+            .getEvents()
+            .filter((e) => !e.isRedacted() && isThreadRelationEvent(e));
+        if (localThreadCandidates.length > 0) {
+            this.processThreadedEvents(localThreadCandidates, false);
+        }
+
         this.threadsReady = true;
     }
 
