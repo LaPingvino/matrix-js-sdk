@@ -4184,6 +4184,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                         room.partitionThreadedEvents(matrixEvents);
 
                     this.processAggregatedTimelineEvents(room, timelineEvents);
+                    room.maybeBackfillThreadRoots(timelineEvents);
                     room.addEventsToTimeline(timelineEvents, true, true, room.getLiveTimeline());
                     this.processThreadEvents(room, threadedEvents, true);
                     unknownRelations.forEach((event) => room.relations.aggregateChildEvent(event));
@@ -4296,6 +4297,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         }
 
         const [timelineEvents, threadedEvents, unknownRelations] = timelineSet.room.partitionThreadedEvents(events);
+        timelineSet.room.maybeBackfillThreadRoots(timelineEvents);
         timelineSet.addEventsToTimeline(timelineEvents, true, false, timeline, res.start);
         // The target event is not in a thread but process the contextual events, so we can show any threads around it.
         this.processThreadEvents(timelineSet.room, threadedEvents, true);
@@ -4849,6 +4851,9 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                     const timelineSet = eventTimeline.getTimelineSet();
                     const [timelineEvents, threadedEvents, unknownRelations] =
                         room.partitionThreadedEvents(matrixEvents);
+                    // Backfill before adding so listeners on RoomEvent.Timeline
+                    // see threads with their root populated.
+                    room.maybeBackfillThreadRoots(timelineEvents);
                     timelineSet.addEventsToTimeline(timelineEvents, backwards, false, eventTimeline, token);
                     this.processAggregatedTimelineEvents(room, timelineEvents);
                     this.processThreadRoots(

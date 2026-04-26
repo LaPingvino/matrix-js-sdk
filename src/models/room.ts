@@ -2229,6 +2229,12 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
             this.processThreadedEvents(localThreadCandidates, false);
         }
 
+        // Catch any thread that ended up with `rootEvent === undefined` after
+        // the rescue. `processThreadedEvents` short-circuits in
+        // `addThreadedEvents` when a Thread already exists for the id and
+        // doesn't try to populate a missing root from the main timeline.
+        this.backfillOrphanedThreadRoots();
+
         this.threadsReady = true;
     }
 
@@ -2731,8 +2737,68 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
      * @remarks
      * Fires {@link RoomEvent.Timeline}
      */
+    /**
+     * If any of the given events is the root of a thread we already track but
+     * for which the root event hasn't been loaded yet, backfill `Thread.rootEvent`.
+     *
+     * Threads can end up with `rootEvent === undefined` when `createThread` is
+     * called from reply events before the root has been loaded into the
+     * client — typical of lazy-loaded rooms, and of paginated history on a
+     * homeserver without MSC3856 server-side thread support, where the
+     * client must bootstrap threads from whatever main-timeline events
+     * happen to be in memory. Without the backfill, those threads stay
+     * "orphaned" forever, because consumers (including the SDK's own
+     * `updateThreadRootEvents` and any UI that guards on `t.rootEvent`)
+     * silently skip them.
+     *
+     * Callable from every code path that adds events to the live main
+     * timeline, so backfill happens regardless of whether the event arrived
+     * via sync (`addLiveEvent`) or back-pagination (`paginateEventTimeline`).
+     */
+    public maybeBackfillThreadRoots(events: MatrixEvent[]): void {
+        for (const event of events) {
+            const eventId = event.getId();
+            if (eventId === undefined) continue;
+            const orphanedThread = this.threads.get(eventId);
+            if (orphanedThread && !orphanedThread.rootEvent) {
+                orphanedThread.rootEvent = event;
+                orphanedThread.emit(ThreadEvent.Update, orphanedThread);
+            }
+        }
+    }
+
+    /**
+     * Walk every known thread and, for any whose root event has not been
+     * populated yet, look it up in this room's main timeline and backfill it.
+     *
+     * The targeted form ({@link maybeBackfillThreadRoots}) only catches roots
+     * as they *arrive*, so it can't fix threads that were created from reply
+     * events at a time when the root *was* already in the room's timeline but
+     * the create path didn't manage to find it — which can happen during
+     * bootstrap (`fetchRoomThreads`) when the rescue scan registers a thread
+     * via `processThreadedEvents` whose `addThreadedEvents` short-circuit
+     * doesn't run the lookup. This walks the orphan threads once and
+     * resolves them, after which both the SDK and consumers see consistent
+     * state and don't need to rediscover the threads via main-timeline
+     * scans on every render.
+     */
+    public backfillOrphanedThreadRoots(): void {
+        for (const thread of this.threads.values()) {
+            if (thread.rootEvent) continue;
+            const rootEvent = this.findEventById(thread.id);
+            if (rootEvent) {
+                thread.rootEvent = rootEvent;
+                thread.emit(ThreadEvent.Update, thread);
+            }
+        }
+    }
+
     private addLiveEvent(event: MatrixEvent, addLiveEventOptions: IAddLiveEventOptions): void {
         const { duplicateStrategy, timelineWasEmpty, fromCache, addToState } = addLiveEventOptions;
+
+        // Run *before* adding to timeline sets so consumers responding to
+        // `RoomEvent.Timeline` see a thread that already has its root.
+        this.maybeBackfillThreadRoots([event]);
 
         // add to our timeline sets
         for (const timelineSet of this.timelineSets) {
