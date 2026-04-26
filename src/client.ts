@@ -527,6 +527,33 @@ export interface IStartClientOpts {
      * @experimental
      */
     slidingSync?: SlidingSync;
+
+    /**
+     * Opt in to a more aggressively-lazy mode that prioritises a fast initial
+     * sync over having a fully-populated cache. Recommended for clients that
+     * use a large number of rooms and rely on incremental pagination to
+     * surface older history.
+     *
+     * When set:
+     *   - {@link IStartClientOpts.lazyLoadMembers} defaults to `true` if not
+     *     otherwise specified.
+     *   - {@link IStartClientOpts.initialSyncLimit} defaults to `1` if not
+     *     otherwise specified, so the initial `/sync` returns only the most
+     *     recent message per room.
+     *   - The SDK enables several lazy-tolerant behaviours that would
+     *     otherwise assume the initial sync window covers most relevant
+     *     events. In particular, {@link Thread} objects whose root event has
+     *     not yet been loaded will fetch it on demand via
+     *     {@link MatrixClient.fetchRoomEvent} regardless of
+     *     {@link Thread.hasServerSideSupport}, and {@link Room.fetchRoomThreads}
+     *     skips its heavy server-filter bootstrap (which fetches up to
+     *     `Number.MAX_SAFE_INTEGER` events and thus defeats the lazy intent)
+     *     and relies on the local-timeline rescue alone.
+     *
+     * Defaults to `false`. Once set, the value is observable via
+     * {@link MatrixClient.fullLazyLoading}.
+     */
+    fullLazyLoading?: boolean;
 }
 
 export interface IStoredClientOpts extends IStartClientOpts {}
@@ -1458,6 +1485,17 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         }
 
         this.clientOpts = opts ?? {};
+        if (this.clientOpts.fullLazyLoading) {
+            // Apply lazy-tolerant defaults. The caller can still override
+            // either of these explicitly — the defaults only kick in when
+            // the field is left undefined.
+            if (this.clientOpts.lazyLoadMembers === undefined) {
+                this.clientOpts.lazyLoadMembers = true;
+            }
+            if (this.clientOpts.initialSyncLimit === undefined) {
+                this.clientOpts.initialSyncLimit = 1;
+            }
+        }
         if (this.clientOpts.slidingSync) {
             this.syncApi = new SlidingSyncSdk(
                 this.clientOpts.slidingSync,
@@ -8288,6 +8326,16 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      */
     public supportsThreads(): boolean {
         return this.clientOpts?.threadSupport || false;
+    }
+
+    /**
+     * Whether the client was started with {@link IStartClientOpts.fullLazyLoading}.
+     *
+     * Use this to opt into lazy-tolerant code paths inside the SDK. See
+     * {@link IStartClientOpts.fullLazyLoading} for what the flag implies.
+     */
+    public isFullLazyLoading(): boolean {
+        return this.clientOpts?.fullLazyLoading || false;
     }
 
     /**

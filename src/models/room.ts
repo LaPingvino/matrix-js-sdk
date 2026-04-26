@@ -2148,6 +2148,16 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
                 this.fetchRoomThreadList(ThreadFilterType.All),
                 this.fetchRoomThreadList(ThreadFilterType.My),
             ]);
+        } else if (this.client.isFullLazyLoading?.()) {
+            // In full-lazy mode we deliberately *don't* run the
+            // server-filter bootstrap below. That path requests up to
+            // `Number.MAX_SAFE_INTEGER` events, expects bundled
+            // `m.thread` aggregations on every returned event (which a
+            // homeserver without MSC3856 won't produce), and would defeat
+            // the entire reason `fullLazyLoading` was opted into. The
+            // local-timeline rescue at the bottom of this method, plus
+            // on-demand `fetchRootEvent` from {@link Thread}, give
+            // consumers a consistent view as history paginates in.
         } else {
             const allThreadsFilter = await this.getThreadListFilter();
 

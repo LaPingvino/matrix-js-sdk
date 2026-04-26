@@ -588,7 +588,13 @@ export class Thread extends ReadReceipt<ThreadEmittedEvents, ThreadEventHandlerM
     }
 
     private async updateThreadFromRootEvent(): Promise<void> {
-        if (Thread.hasServerSideSupport) {
+        // Normally only run with server-side thread support — but in
+        // `fullLazyLoading` mode the *expected* state is that the root event
+        // hasn't been loaded yet (the initial sync only carries one event
+        // per room), so the same fetch is needed without server-side
+        // thread bundling. The endpoint used (`/rooms/{roomId}/event/{eventId}`)
+        // works on every server.
+        if (Thread.hasServerSideSupport || this.client.isFullLazyLoading?.()) {
             // Ensure we show *something* as soon as possible, we'll update it as soon as we get better data, but we
             // don't want the thread preview to be empty if we can avoid it
             if (!this.initialEventsFetched && !this.lastEvent) {
