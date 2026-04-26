@@ -395,6 +395,25 @@ export interface AccountDataEvents extends SecretStorageAccountDataEvents {
     // Invites-ignorer events
     [POLICIES_ACCOUNT_EVENT_TYPE.name]: { [key: string]: any };
     [POLICIES_ACCOUNT_EVENT_TYPE.altName]: { [key: string]: any };
+
+    // MSC4155 invite filtering. Both the unstable namespace and the stable name
+    // proposed by the MSC are typed here so clients can write either form
+    // without fighting the SDK's keyof check.
+    "org.matrix.msc4155.invite_permission_config": InvitePermissionConfigContent;
+    "m.invite_permission_config": InvitePermissionConfigContent;
+}
+
+/**
+ * Account-data content for [MSC4155](https://github.com/matrix-org/matrix-spec-proposals/pull/4155)
+ * (Invite filtering). All fields are optional. A literal `"*"` entry in
+ * `blocked_servers` means "block invites from every server".
+ */
+export interface InvitePermissionConfigContent {
+    default?: "allow" | "block";
+    allowed_users?: string[];
+    blocked_users?: string[];
+    allowed_servers?: string[];
+    blocked_servers?: string[];
 }
 
 /**
