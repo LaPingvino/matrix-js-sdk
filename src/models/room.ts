@@ -55,6 +55,7 @@ import { BeaconEvent, type BeaconEventHandlerMap } from "./beacon.ts";
 import {
     FILTER_RELATED_BY_REL_TYPES,
     FILTER_RELATED_BY_SENDERS,
+    isThreadRelationEvent,
     Thread,
     THREAD_RELATION_TYPE,
     ThreadEvent,
@@ -2387,7 +2388,7 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
             };
         }
 
-        const isThreadRelation = event.isRelation(THREAD_RELATION_TYPE.name);
+        const isThreadRelation = isThreadRelationEvent(event);
         const parentEventId = event.getAssociatedId();
         const threadRootId = event.threadRootId;
 

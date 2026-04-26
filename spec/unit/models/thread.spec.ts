@@ -18,7 +18,13 @@ import { mocked } from "jest-mock";
 
 import { MatrixClient, PendingEventOrdering } from "../../../src/client";
 import { Room, RoomEvent } from "../../../src/models/room";
-import { FeatureSupport, Thread, THREAD_RELATION_TYPE, ThreadEvent } from "../../../src/models/thread";
+import {
+    FeatureSupport,
+    isThreadRelationEvent,
+    Thread,
+    THREAD_RELATION_TYPE,
+    ThreadEvent,
+} from "../../../src/models/thread";
 import { makeThreadEvent, mkThread, populateThread } from "../../test-utils/thread";
 import { TestClient } from "../../TestClient";
 import { emitPromise, mkEdit, mkMessage, mkReaction, mock } from "../../test-utils/test-utils";
@@ -983,6 +989,60 @@ describe("Thread", () => {
                 }
             });
         });
+    });
+});
+
+describe("isThreadRelationEvent", () => {
+    function makeRelEvent(relType: string): MatrixEvent {
+        return new MatrixEvent({
+            type: "m.room.message",
+            sender: "@alice:example.org",
+            room_id: "!room:example.org",
+            event_id: "$child",
+            origin_server_ts: 1,
+            content: {
+                "body": "child",
+                "msgtype": "m.text",
+                "m.relates_to": {
+                    rel_type: relType,
+                    event_id: "$root",
+                },
+            },
+        });
+    }
+
+    afterEach(() => {
+        // Make sure the global preference doesn't bleed between tests.
+        Thread.setServerSideSupport(FeatureSupport.Stable);
+    });
+
+    it("matches stable m.thread events when the SDK prefers the stable namespace", () => {
+        Thread.setServerSideSupport(FeatureSupport.Stable);
+        expect(isThreadRelationEvent(makeRelEvent("m.thread"))).toBe(true);
+    });
+
+    it("matches unstable io.element.thread events when the SDK prefers the stable namespace", () => {
+        Thread.setServerSideSupport(FeatureSupport.Stable);
+        expect(isThreadRelationEvent(makeRelEvent("io.element.thread"))).toBe(true);
+    });
+
+    it("matches stable m.thread events even when the SDK is configured for the unstable namespace", () => {
+        // setServerSideSupport(None) flips THREAD_RELATION_TYPE.name to the
+        // unstable form. The naive `event.isRelation(THREAD_RELATION_TYPE.name)`
+        // would reject stable-named events here — this helper must not.
+        Thread.setServerSideSupport(FeatureSupport.None);
+        expect(isThreadRelationEvent(makeRelEvent("m.thread"))).toBe(true);
+    });
+
+    it("matches unstable events when the SDK is configured for the unstable namespace", () => {
+        Thread.setServerSideSupport(FeatureSupport.None);
+        expect(isThreadRelationEvent(makeRelEvent("io.element.thread"))).toBe(true);
+    });
+
+    it("does not match unrelated relation types", () => {
+        expect(isThreadRelationEvent(makeRelEvent("m.replace"))).toBe(false);
+        expect(isThreadRelationEvent(makeRelEvent("m.annotation"))).toBe(false);
+        expect(isThreadRelationEvent(makeRelEvent("m.reference"))).toBe(false);
     });
 });
 

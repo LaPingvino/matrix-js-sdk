@@ -226,7 +226,7 @@ export class Thread extends ReadReceipt<ThreadEmittedEvents, ThreadEventHandlerM
 
     private onBeforeRedaction = (event: MatrixEvent, redaction: MatrixEvent): void => {
         if (
-            event?.isRelation(THREAD_RELATION_TYPE.name) &&
+            isThreadRelationEvent(event) &&
             this.room.eventShouldLiveIn(event).threadId === this.id &&
             event.getId() !== this.id && // the root event isn't counted in the length so ignore this redaction
             !redaction.status // only respect it when it succeeds
@@ -267,7 +267,7 @@ export class Thread extends ReadReceipt<ThreadEmittedEvents, ThreadEventHandlerM
             if (sender && room && this.shouldSendLocalEchoReceipt(sender, event)) {
                 room.addLocalEchoReceipt(sender, event, ReceiptType.Read);
             }
-            if (event.getId() !== this.id && event.isRelation(THREAD_RELATION_TYPE.name)) {
+            if (event.getId() !== this.id && isThreadRelationEvent(event)) {
                 this.replyCount++;
             }
         }
@@ -301,7 +301,7 @@ export class Thread extends ReadReceipt<ThreadEmittedEvents, ThreadEventHandlerM
         if (event.threadRootId !== this.id) return; // ignore echoes for other timelines
         if (this.lastEvent === event) return; // ignore duplicate events
         await this.updateThreadMetadata();
-        if (!event.isRelation(THREAD_RELATION_TYPE.name)) return; // don't send a new reply event for reactions or edits
+        if (!isThreadRelationEvent(event)) return; // don't send a new reply event for reactions or edits
         if (toStartOfTimeline) return; // ignore messages added to the start of the timeline
         // Clear the lastEvent and instead start tracking locally using lastReply
         this.lastEvent = undefined;
@@ -404,7 +404,7 @@ export class Thread extends ReadReceipt<ThreadEmittedEvents, ThreadEventHandlerM
 
         if (
             event.getId() !== this.id &&
-            event.isRelation(THREAD_RELATION_TYPE.name) &&
+            isThreadRelationEvent(event) &&
             !toStartOfTimeline &&
             isNewestReply
         ) {
@@ -522,7 +522,7 @@ export class Thread extends ReadReceipt<ThreadEmittedEvents, ThreadEventHandlerM
         const pendingEvents = unfilteredPendingEvents.filter(
             (ev) =>
                 ev.threadRootId === this.id &&
-                ev.isRelation(THREAD_RELATION_TYPE.name) &&
+                isThreadRelationEvent(ev) &&
                 ev.status !== null &&
                 ev.getId() !== this.lastEvent?.getId(),
         );
@@ -711,7 +711,7 @@ export class Thread extends ReadReceipt<ThreadEmittedEvents, ThreadEventHandlerM
      * Return last reply to the thread, if known.
      */
     public lastReply(
-        matches: (ev: MatrixEvent) => boolean = (ev): boolean => ev.isRelation(THREAD_RELATION_TYPE.name),
+        matches: (ev: MatrixEvent) => boolean = (ev): boolean => isThreadRelationEvent(ev),
     ): MatrixEvent | null {
         for (let i = this.timeline.length - 1; i >= 0; i--) {
             const event = this.timeline[i];
@@ -902,7 +902,7 @@ export class Thread extends ReadReceipt<ThreadEmittedEvents, ThreadEventHandlerM
  * thread - either inside it, or a root.
  */
 function isAnEncryptedThreadMessage(event: MatrixEvent): boolean {
-    return event.isEncrypted() && (event.isRelation(THREAD_RELATION_TYPE.name) || event.isThreadRoot);
+    return event.isEncrypted() && (isThreadRelationEvent(event) || event.isThreadRoot);
 }
 
 export const FILTER_RELATED_BY_SENDERS = new ServerControlledNamespacedValue(
@@ -914,6 +914,27 @@ export const FILTER_RELATED_BY_REL_TYPES = new ServerControlledNamespacedValue(
     "io.element.relation_types",
 );
 export const THREAD_RELATION_TYPE = new ServerControlledNamespacedValue("m.thread", "io.element.thread");
+
+/**
+ * Returns true if the event is a thread relation in either the stable
+ * (`m.thread`) or unstable (`io.element.thread`) namespace.
+ *
+ * Prefer this over `event.isRelation(THREAD_RELATION_TYPE.name)`: that helper
+ * returns only the *currently preferred* name and so will reject the other
+ * namespace, which causes thread events to be silently dropped when the SDK
+ * thinks the homeserver lacks server-side thread support but a federated
+ * client / server happens to use the opposite namespace.
+ */
+export function isThreadRelationEvent(event: MatrixEvent): boolean {
+    const relType = event.getRelation()?.rel_type;
+    if (typeof relType !== "string") return false;
+    // Compare against both raw names rather than `THREAD_RELATION_TYPE.matches()`:
+    // that helper, on a `ServerControlledNamespacedValue`, returns the
+    // currently-preferred name twice (its `name` getter is overridden but
+    // `altName` is not), so it has the same single-namespace blind spot
+    // we're trying to fix here.
+    return relType === THREAD_RELATION_TYPE.stable || relType === THREAD_RELATION_TYPE.unstable;
+}
 
 export enum ThreadFilterType {
     "My",

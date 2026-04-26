@@ -205,6 +205,7 @@ import { SlidingSyncSdk } from "./sliding-sync-sdk.ts";
 import {
     determineFeatureSupport,
     FeatureSupport,
+    isThreadRelationEvent,
     Thread,
     THREAD_RELATION_TYPE,
     ThreadFilterType,
@@ -2686,7 +2687,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                     event_id:
                         thread
                             .lastReply((ev: MatrixEvent) => {
-                                return ev.isRelation(THREAD_RELATION_TYPE.name) && !ev.status;
+                                return isThreadRelationEvent(ev) && !ev.status;
                             })
                             ?.getId() ?? threadId,
                 };
@@ -4271,7 +4272,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
 
         const mapper = this.getEventMapper();
         const event = mapper(res.event);
-        if (event.isRelation(THREAD_RELATION_TYPE.name)) {
+        if (isThreadRelationEvent(event)) {
             this.logger.warn("Tried loading a regular timeline at the position of a thread event");
             return undefined;
         }
@@ -8575,7 +8576,7 @@ export function inMainTimelineForReceipt(event: MatrixEvent): boolean {
         return true;
     }
 
-    if (event.isRelation(THREAD_RELATION_TYPE.name)) {
+    if (isThreadRelationEvent(event)) {
         // It's a message in a thread - definitely not in the main timeline.
         return false;
     }
