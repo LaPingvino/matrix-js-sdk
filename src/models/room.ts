@@ -1876,6 +1876,74 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
         return Array.from(this.threads.values());
     }
 
+    private backgroundBackfillPromise?: Promise<void>;
+
+    /**
+     * Background-backfill this room's main timeline so it holds at least
+     * `targetDepth` events.
+     *
+     * Pages backwards in chunks of `chunkSize` via
+     * {@link MatrixClient.paginateEventTimeline}, yielding to the host
+     * between chunks with `setTimeout(resolve, 0)` so the UI thread stays
+     * responsive. Cancellable via `abortSignal`. Idempotent — if the room
+     * already has `targetDepth` events or there is no more history,
+     * returns immediately. Concurrent calls for the same room reuse the
+     * in-flight promise rather than double-paginating.
+     *
+     * Designed to support clients running with
+     * {@link IStartClientOpts.fullLazyLoading}: the initial sync only
+     * carries one event per room, so SDK methods that expect a populated
+     * timeline (relations aggregation, thread bootstrap, last-event
+     * preview, …) need a way to make the timeline ready ahead of user
+     * interaction. Callers are expected to drive this from a priority
+     * queue based on UI signals such as the currently-viewed room,
+     * unread counts, and recent navigation.
+     *
+     * @returns A promise that resolves when the timeline has reached
+     * `targetDepth` events, when no more history is available, or when
+     * the abort signal fires.
+     */
+    public backgroundBackfill(opts: {
+        targetDepth: number;
+        abortSignal?: AbortSignal;
+        chunkSize?: number;
+    }): Promise<void> {
+        // Coalesce concurrent calls on the same room — each tick of a
+        // priority queue can re-request the same room, and we don't want
+        // overlapping pagination requests racing for the same backwards
+        // token.
+        if (this.backgroundBackfillPromise) {
+            return this.backgroundBackfillPromise;
+        }
+        const { targetDepth, abortSignal, chunkSize = 8 } = opts;
+        const liveTimeline = this.getLiveTimeline();
+
+        const work = async (): Promise<void> => {
+            while (liveTimeline.getEvents().length < targetDepth) {
+                if (abortSignal?.aborted) return;
+                const token = liveTimeline.getPaginationToken(EventTimeline.BACKWARDS);
+                if (!token) return;
+
+                const moreAvailable = await this.client.paginateEventTimeline(liveTimeline, {
+                    backwards: true,
+                    limit: chunkSize,
+                });
+                if (!moreAvailable) return;
+
+                // Yield between chunks so the host can do anything else
+                // (render frames, handle user input, dispatch sync). This
+                // is the difference between background work and a tight
+                // loop that monopolises the event loop.
+                await new Promise<void>((resolve) => setTimeout(resolve, 0));
+            }
+        };
+
+        this.backgroundBackfillPromise = work().finally(() => {
+            this.backgroundBackfillPromise = undefined;
+        });
+        return this.backgroundBackfillPromise;
+    }
+
     /**
      * Get a member from the current room state.
      * @param userId - The user ID of the member.
