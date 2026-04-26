@@ -4847,7 +4847,8 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                     const matrixEvents = res.chunk.filter(noUnsafeEventProps).map(this.getEventMapper());
 
                     const timelineSet = eventTimeline.getTimelineSet();
-                    const [timelineEvents, , unknownRelations] = room.partitionThreadedEvents(matrixEvents);
+                    const [timelineEvents, threadedEvents, unknownRelations] =
+                        room.partitionThreadedEvents(matrixEvents);
                     timelineSet.addEventsToTimeline(timelineEvents, backwards, false, eventTimeline, token);
                     this.processAggregatedTimelineEvents(room, timelineEvents);
                     this.processThreadRoots(
@@ -4855,6 +4856,13 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                         timelineEvents.filter((it) => it.getServerAggregatedRelation(THREAD_RELATION_TYPE.name)),
                         false,
                     );
+                    // Route threaded events into their `Thread` objects (creating
+                    // any thread that doesn't yet exist). Without this, paginating
+                    // backwards into history that contains thread replies on a
+                    // homeserver without MSC3856 silently drops every reply: it's
+                    // not added to the main timeline (partition strips it) and
+                    // not added to a thread (this path used to ignore it).
+                    this.processThreadEvents(room, threadedEvents, backwards);
                     unknownRelations.forEach((event) => room.relations.aggregateChildEvent(event));
 
                     const atEnd = res.end === undefined || res.end === res.start;
