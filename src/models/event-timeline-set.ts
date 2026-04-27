@@ -61,6 +61,14 @@ export interface IAddEventToTimelineOptions
     extends Pick<IAddEventOptions, "toStartOfTimeline" | "roomState" | "timelineWasEmpty" | "addToState"> {
     /** Whether the sync response came from cache */
     fromCache?: boolean;
+    /**
+     * If true, suppress the {@link RoomEvent.Timeline} emit. The event is still
+     * added to the timeline (so relations aggregate, pagination tokens advance,
+     * future scrollback hits the cache) but UI consumers listening on the room
+     * are not woken up. Used for warmup/background backfill where the goal is
+     * to populate the SDK's event store without causing visible re-renders.
+     */
+    quiet?: boolean;
 }
 
 export interface IAddLiveEventOptions
@@ -394,6 +402,7 @@ export class EventTimelineSet extends TypedEventEmitter<EmittedEvents, EventTime
         addToState: boolean,
         timeline: EventTimeline,
         paginationToken?: string | null,
+        quiet?: boolean,
     ): void {
         if (!timeline) {
             throw new Error("'timeline' not specified for EventTimelineSet.addEventsToTimeline");
@@ -497,6 +506,7 @@ export class EventTimelineSet extends TypedEventEmitter<EmittedEvents, EventTime
                 this.addEventToTimeline(event, timeline, {
                     toStartOfTimeline,
                     addToState,
+                    quiet,
                 });
                 lastEventWasNew = true;
                 didUpdate = true;
@@ -652,7 +662,14 @@ export class EventTimelineSet extends TypedEventEmitter<EmittedEvents, EventTime
     public addEventToTimeline(
         event: MatrixEvent,
         timeline: EventTimeline,
-        { toStartOfTimeline, fromCache = false, roomState, timelineWasEmpty, addToState }: IAddEventToTimelineOptions,
+        {
+            toStartOfTimeline,
+            fromCache = false,
+            roomState,
+            timelineWasEmpty,
+            addToState,
+            quiet = false,
+        }: IAddEventToTimelineOptions,
     ): void {
         if (timeline.getTimelineSet() !== this) {
             throw new Error(`EventTimelineSet.addEventToTimeline: Timeline=${timeline.toString()} does not belong " +
@@ -692,7 +709,9 @@ export class EventTimelineSet extends TypedEventEmitter<EmittedEvents, EventTime
             timeline: timeline,
             liveEvent: !toStartOfTimeline && timeline == this.liveTimeline && !fromCache,
         };
-        this.emit(RoomEvent.Timeline, event, this.room, Boolean(toStartOfTimeline), false, data);
+        if (!quiet) {
+            this.emit(RoomEvent.Timeline, event, this.room, Boolean(toStartOfTimeline), false, data);
+        }
     }
 
     /**

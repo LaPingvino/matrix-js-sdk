@@ -4753,7 +4753,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                     // No need to partition events for threads here, everything lives
                     // in the notification timeline set
                     const timelineSet = eventTimeline.getTimelineSet();
-                    timelineSet.addEventsToTimeline(matrixEvents, backwards, false, eventTimeline, token);
+                    timelineSet.addEventsToTimeline(matrixEvents, backwards, false, eventTimeline, token, opts.quiet);
                     this.processAggregatedTimelineEvents(timelineSet.room, matrixEvents);
 
                     // if we've hit the end of the timeline, we need to stop trying to
@@ -4796,7 +4796,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                     const matrixEvents = res.chunk.filter(noUnsafeEventProps).map(this.getEventMapper());
 
                     const timelineSet = eventTimeline.getTimelineSet();
-                    timelineSet.addEventsToTimeline(matrixEvents, backwards, false, eventTimeline, token);
+                    timelineSet.addEventsToTimeline(matrixEvents, backwards, false, eventTimeline, token, opts.quiet);
                     this.processAggregatedTimelineEvents(room, matrixEvents);
                     this.processThreadRoots(room, matrixEvents, backwards);
 
@@ -4892,7 +4892,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                     // Backfill before adding so listeners on RoomEvent.Timeline
                     // see threads with their root populated.
                     room.maybeBackfillThreadRoots(timelineEvents);
-                    timelineSet.addEventsToTimeline(timelineEvents, backwards, false, eventTimeline, token);
+                    timelineSet.addEventsToTimeline(timelineEvents, backwards, false, eventTimeline, token, opts.quiet);
                     this.processAggregatedTimelineEvents(room, timelineEvents);
                     this.processThreadRoots(
                         room,

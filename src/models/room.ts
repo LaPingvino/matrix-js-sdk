@@ -1927,6 +1927,14 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
                 const moreAvailable = await this.client.paginateEventTimeline(liveTimeline, {
                     backwards: true,
                     limit: chunkSize,
+                    // Warmup mode: events go into the timeline (so relations
+                    // aggregate, pagination tokens advance, future scrollback
+                    // hits the cache) but we don't fire RoomEvent.Timeline.
+                    // UI consumers like the room timeline view stay still
+                    // instead of re-rendering with prepended history. The
+                    // events become visible the next time the user actually
+                    // scrolls, served instantly from the cache we just built.
+                    quiet: true,
                 });
                 if (!moreAvailable) return;
 
