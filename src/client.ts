@@ -6961,7 +6961,16 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      * @returns The prefix for use with `authedRequest`
      */
     private async getExtendedProfileRequestPrefix(): Promise<string> {
-        if (await this.doesServerSupportUnstableFeature("uk.tcpip.msc4133.stable")) {
+        // MSC4133 was stabilised in spec v1.15. Servers advertising v1.15 are
+        // expected to serve extended profiles at /_matrix/client/v3/profile/...
+        // regardless of whether they also advertise the (now-redundant)
+        // `uk.tcpip.msc4133.stable` unstable-feature flag — Continuwuity, for
+        // example, ships v1.15 without that flag, which used to silently route
+        // requests to the unstable namespace and 404.
+        if (
+            (await this.isVersionSupported("v1.15")) ||
+            (await this.doesServerSupportUnstableFeature("uk.tcpip.msc4133.stable"))
+        ) {
             return ClientPrefix.V3;
         }
         return "/_matrix/client/unstable/uk.tcpip.msc4133";
