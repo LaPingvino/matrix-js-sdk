@@ -1,0 +1,120 @@
+import type { IMentions } from "../matrix.ts";
+import type { RelationEvent } from "../types.ts";
+import type { CallMembership } from "./CallMembership.ts";
+export type ParticipantId = string;
+export interface EncryptionKeyEntry {
+    index: number;
+    key: string;
+}
+/**
+ * The mxID, deviceId and membership timestamp of a RTC session participant.
+ */
+export type ParticipantDeviceInfo = {
+    userId: string;
+    deviceId: string;
+    membershipTs: number;
+};
+/**
+ * A type representing the information needed to decrypt video streams.
+ */
+export type InboundEncryptionSession = {
+    key: Uint8Array;
+    participantId: ParticipantId;
+    keyIndex: number;
+    creationTS: number;
+};
+/**
+ * The information about the key used to encrypt video streams.
+ */
+export type OutboundEncryptionSession = {
+    key: Uint8Array;
+    creationTS: number;
+    sharedWith: Array<ParticipantDeviceInfo>;
+    keyId: number;
+};
+export interface EncryptionKeysEventContent {
+    keys: EncryptionKeyEntry[];
+    device_id: string;
+    call_id: string;
+    sent_ts?: number;
+}
+/**
+ * THe content of a to-device event that contains encryption keys.
+ */
+export interface EncryptionKeysToDeviceEventContent {
+    keys: {
+        index: number;
+        key: string;
+    };
+    member: {
+        claimed_device_id: string;
+    };
+    room_id: string;
+    session: {
+        application: string;
+        call_id: string;
+        scope: string;
+    };
+    sent_ts?: number;
+}
+/**
+ * @deprecated Use `RTCNotificationType` instead.
+ */
+export type CallNotifyType = "ring" | "notify";
+/**
+ * @deprecated Use `IRTCNotificationContent` instead.
+ */
+export interface ICallNotifyContent {
+    "application": string;
+    "m.mentions": IMentions;
+    "notify_type": CallNotifyType;
+    "call_id": string;
+}
+export type RTCNotificationType = "ring" | "notification";
+export interface IRTCNotificationContent extends RelationEvent {
+    "m.mentions": IMentions;
+    "decline_reason"?: string;
+    "notification_type": RTCNotificationType;
+    "sender_ts": number;
+    "lifetime": number;
+}
+/**
+ * MSC4310 decline event content for `org.matrix.msc4310.rtc.decline`.
+ * Sent as a standard m.reference relation to an `org.matrix.msc4075.rtc.notification` event.
+ */
+export interface IRTCDeclineContent extends RelationEvent {
+}
+export declare enum Status {
+    Disconnected = "Disconnected",
+    Connecting = "Connecting",
+    ConnectingFailed = "ConnectingFailed",
+    Connected = "Connected",
+    Reconnecting = "Reconnecting",
+    Disconnecting = "Disconnecting",
+    Stuck = "Stuck",
+    Unknown = "Unknown"
+}
+/**
+ * A type collecting call encryption statistics for a session.
+ */
+export type Statistics = {
+    counters: {
+        /**
+         * The number of times we have sent a room event containing encryption keys.
+         */
+        roomEventEncryptionKeysSent: number;
+        /**
+         * The number of times we have received a room event containing encryption keys.
+         */
+        roomEventEncryptionKeysReceived: number;
+    };
+    totals: {
+        /**
+         * The total age (in milliseconds) of all room events containing encryption keys that we have received.
+         * We track the total age so that we can later calculate the average age of all keys received.
+         */
+        roomEventEncryptionKeysReceivedTotalAge: number;
+    };
+};
+export declare const isMyMembership: (m: CallMembership, userId: string, deviceId: string) => boolean;
+//# sourceMappingURL=types.d.ts.map

@@ -1,0 +1,81 @@
+import type { CallMembership } from "./CallMembership.ts";
+import type { Focus } from "./focus.ts";
+import type { Status } from "./types.ts";
+import { type TypedEventEmitter } from "../models/typed-event-emitter.ts";
+export declare enum MembershipManagerEvent {
+    StatusChanged = "StatusChanged",
+    /**
+     * Emitted when the membership manager has not heard back from the server for the duration
+     * of the delayed event and hence failed to restart the delayed event.
+     * This means that the user is probably not joined anymore and the leave event was distributed to other session members.
+     */
+    ProbablyLeft = "ProbablyLeft"
+}
+export type MembershipManagerEventHandlerMap = {
+    [MembershipManagerEvent.StatusChanged]: (prefStatus: Status, newStatus: Status) => void;
+    [MembershipManagerEvent.ProbablyLeft]: (probablyLeft: boolean) => void;
+};
+/**
+ * This interface defines what a MembershipManager uses and exposes.
+ * This interface is what we use to write tests and allows changing the actual implementation
+ * without breaking tests because of some internal method renaming.
+ *
+ * @internal
+ */
+export interface IMembershipManager extends TypedEventEmitter<MembershipManagerEvent, MembershipManagerEventHandlerMap> {
+    /**
+     * If we are trying to join, or have successfully joined the session.
+     * It does not reflect if the room state is already configured to represent us being joined.
+     * It only means that the Manager should be trying to connect or to disconnect running.
+     * The Manager is still running right after isJoined becomes false to send the disconnect events.
+     * @returns true if we intend to be participating in the MatrixRTC session
+     * @deprecated This name is confusing and replaced by `isActivated()`. (Returns the same as `isActivated()`)
+     */
+    isJoined(): boolean;
+    /**
+     * If the manager is activated. This means it tries to do its job to join the call, resend state events...
+     * It does not imply that the room state is already configured to represent being joined.
+     * It means that the Manager tries to connect or is connected. ("the manager is still active")
+     * Once `leave()` is called the manager is not activated anymore but still running until `leave()` resolves.
+     * @returns `true` if we intend to be participating in the MatrixRTC session
+     */
+    isActivated(): boolean;
+    /**
+     * Get the actual connection status of the manager.
+     */
+    get status(): Status;
+    /**
+     * The Current own state event if the manger is connected.
+     * `undefined` if not connected.
+     */
+    get ownMembership(): CallMembership | undefined;
+    /**
+     * If the membership manager has reason to believe that the hs sent a leave event
+     * and as a consequence the current user is perceived as left for other session participants.
+     */
+    get probablyLeft(): boolean;
+    /**
+     * Start sending all necessary events to make this user participate in the RTC session.
+     * @param fociPreferred the list of preferred foci to use in the joined RTC membership event.
+     * @param fociActive the active focus to use in the joined RTC membership event.
+     * @throws can throw if it exceeds a configured maximum retry.
+     */
+    join(fociPreferred: Focus[], fociActive?: Focus, onError?: (error: unknown) => void): void;
+    /**
+     * Send all necessary events to make this user leave the RTC session.
+     * @param timeout the maximum duration in ms until the promise is forced to resolve.
+     * @returns It resolves with true in case the leave was sent successfully.
+     * It resolves with false in case we hit the timeout before sending successfully.
+     */
+    leave(timeout?: number): Promise<boolean>;
+    /**
+     * Call this if the MatrixRTC session members have changed.
+     */
+    onRTCSessionMemberUpdate(memberships: CallMembership[]): Promise<void>;
+    /**
+     * The used active focus in the currently joined session.
+     * @returns the used active focus in the currently joined session or undefined if not joined.
+     */
+    getActiveFocus(): Focus | undefined;
+}
+//# sourceMappingURL=IMembershipManager.d.ts.map
