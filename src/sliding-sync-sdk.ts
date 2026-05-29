@@ -550,6 +550,13 @@ export class SlidingSyncSdk {
     }
 
     private async processRoomData(client: MatrixClient, room: Room, roomData: MSC3575RoomData): Promise<void> {
+        // Only store the room the first time we see it. The server re-sends rooms
+        // with initial=true whenever they (re-)enter a sliding window (e.g. as
+        // the range grows), and store.storeRoom() registers a fresh
+        // RoomState.members listener each call — so re-storing leaks listeners
+        // (MaxListenersExceededWarning) on large accounts. State still updates
+        // via injectRoomEvents regardless.
+        const newToStore = !client.store.getRoom(room.roomId);
         roomData = ensureNameEvent(client, room.roomId, roomData);
         const stateEvents = mapEvents(this.client, room.roomId, roomData.required_state);
         // Prevent events from being decrypted ahead of time
@@ -632,7 +639,7 @@ export class SlidingSyncSdk {
         if (roomData.invite_state) {
             const inviteStateEvents = mapEvents(this.client, room.roomId, roomData.invite_state);
             await this.injectRoomEvents(room, inviteStateEvents);
-            if (roomData.initial) {
+            if (roomData.initial && newToStore) {
                 room.recalculate();
                 this.client.store.storeRoom(room);
                 this.client.emit(ClientEvent.Room, room);
@@ -714,7 +721,7 @@ export class SlidingSyncSdk {
         room.setMSC4186SummaryData(roomData.heroes, roomData.joined_count, roomData.invited_count);
 
         room.recalculate();
-        if (roomData.initial) {
+        if (roomData.initial && newToStore) {
             client.store.storeRoom(room);
             client.emit(ClientEvent.Room, room);
         }

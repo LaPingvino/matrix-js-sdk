@@ -690,7 +690,7 @@ export class EventTimelineSet extends TypedEventEmitter<EmittedEvents, EventTime
             if (event.threadRootId) {
                 eventDebugString += `(belongs to thread=${event.threadRootId})`;
             }
-            logger.warn(
+            logger.debug(
                 `EventTimelineSet.addEventToTimeline: Ignoring ${eventDebugString} that does not belong ` +
                     `in timeline=${timeline.toString()} timelineSet(threadId=${this.thread?.id})`,
             );
@@ -965,7 +965,7 @@ export class EventTimelineSet extends TypedEventEmitter<EmittedEvents, EventTime
         }
 
         if (!shouldLiveInRoom && !shouldLiveInThread) {
-            logger.warn(
+            logger.debug(
                 `EventTimelineSet:canContain event encountered which cannot be added to any timeline roomId=${
                     this.room?.roomId
                 } eventId=${event.getId()} threadId=${event.threadRootId}`,
