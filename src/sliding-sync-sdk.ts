@@ -231,7 +231,15 @@ class ExtensionAccountData implements Extension<ExtensionAccountDataRequest, Ext
             // (see sync) before syncing over the network.
             if (accountDataEvent.getType() === EventType.PushRules) {
                 const rules = accountDataEvent.getContent<IPushRules>();
-                this.client.setPushRules(rules);
+                // Only re-apply push rules when they actually changed. The
+                // server can resend global account data on every sliding-sync
+                // response, and re-running setPushRules each time is wasteful
+                // (rewriteDefaultRules rebuilds the rule set) and floods logs
+                // with "Missing/Adding default global ... push rule".
+                const prevRules = prevEventsMap[EventType.PushRules]?.getContent<IPushRules>();
+                if (!prevRules || JSON.stringify(prevRules) !== JSON.stringify(rules)) {
+                    this.client.setPushRules(rules);
+                }
             }
             const prevEvent = prevEventsMap[accountDataEvent.getType()];
             this.client.emit(ClientEvent.AccountData, accountDataEvent, prevEvent);
