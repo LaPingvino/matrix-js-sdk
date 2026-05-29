@@ -1210,6 +1210,13 @@ export class SyncApi {
         // Handle joins
         await promiseMapSeries(joinRooms, async (joinObj) => {
             const room = joinObj.room;
+            // Process each joined room defensively. promiseMapSeries is a plain
+            // sequential for/await: if one room throws (e.g. an unsupported room
+            // version or a malformed event), the loop aborts and every room AFTER
+            // it in this batch is never storeRoom()'d — so joined rooms silently
+            // vanish from getRooms() and recur missing on every sync. Catch per
+            // room so one bad room can't drop the rest.
+            try {
             const stateEvents = this.mapSyncEventsFormat(joinObj.state, room);
             const stateAfterEvents = this.mapSyncEventsFormat(joinObj["org.matrix.msc4222.state_after"], room);
             // Prevent events from being decrypted ahead of time
@@ -1413,6 +1420,12 @@ export class SyncApi {
             // And decrypt all events after the recorded read receipt to ensure an accurate
             // notification count
             room.decryptCriticalEvents();
+            } catch (e) {
+                this.syncOpts.logger.error(
+                    `Failed to process joined room ${room?.roomId ?? "?"} during sync; skipping it`,
+                    e,
+                );
+            }
         });
 
         // Handle leaves (e.g. kicked rooms)
