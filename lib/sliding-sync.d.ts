@@ -210,6 +210,8 @@ export declare class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, Sli
      */
     static create(client: MatrixClient, opts?: {
         requiredState?: string[][];
+        spacesRequiredState?: string[][];
+        subscriptionRequiredState?: string[][];
         timelineLimit?: number;
         roomSubscriptionTimelineLimit?: number;
         windowSize?: number;

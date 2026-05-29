@@ -352,6 +352,8 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
         client: MatrixClient,
         opts: {
             requiredState?: string[][];
+            spacesRequiredState?: string[][];
+            subscriptionRequiredState?: string[][];
             timelineLimit?: number;
             roomSubscriptionTimelineLimit?: number;
             windowSize?: number;
@@ -359,7 +361,14 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
             timeoutMS?: number;
         } = {},
     ): SlidingSync {
+        // Per-list required_state lets callers keep the recency "all" list LEAN
+        // (just what an inbox row needs) for a fast first paint, while the
+        // spaces list still pulls the full hierarchy (m.space.child) and opened
+        // rooms get everything via their subscription. All default to
+        // requiredState (or ["*","*"]) for the simple case.
         const requiredState = opts.requiredState ?? [["*", "*"]];
+        const spacesRequiredState = opts.spacesRequiredState ?? requiredState;
+        const subscriptionRequiredState = opts.subscriptionRequiredState ?? requiredState;
         const windowSize = opts.windowSize ?? 100;
         const growBy = opts.growBy ?? 200;
         const lists = new Map<string, MSC3575List>([
@@ -368,7 +377,7 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
                 {
                     ranges: [[0, 199]],
                     timeline_limit: 0,
-                    required_state: requiredState,
+                    required_state: spacesRequiredState,
                     filters: { room_types: ["m.space"] },
                 },
             ],
@@ -384,7 +393,7 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
         ]);
         const roomSubscription: MSC3575RoomSubscription = {
             timeline_limit: opts.roomSubscriptionTimelineLimit ?? 50,
-            required_state: requiredState,
+            required_state: subscriptionRequiredState,
         };
         const ss = new SlidingSync(client.baseUrl, lists, roomSubscription, client, opts.timeoutMS ?? 30_000);
         // Grow the recency window until it covers every room, so consumers that
