@@ -333,18 +333,21 @@ export class MatrixRTCSession extends TypedEventEmitter<
                     const membership = new CallMembership(memberEvent, membershipData);
 
                     if (!deepCompare(membership.sessionDescription, sessionDescription)) {
-                        logger.info(
+                        logger.debug(
                             `Ignoring membership of user ${membership.sender} for a different session:  ${JSON.stringify(membership.sessionDescription)}`,
                         );
                         continue;
                     }
 
                     if (membership.isExpired()) {
-                        logger.info(`Ignoring expired device membership ${membership.sender}/${membership.deviceId}`);
+                        // Routine filtering, re-run on every sync pass for every stale
+                        // call.member device — floods the console (hundreds of lines)
+                        // under sliding sync. Demoted from info to debug.
+                        logger.debug(`Ignoring expired device membership ${membership.sender}/${membership.deviceId}`);
                         continue;
                     }
                     if (!room.hasMembershipState(membership.sender ?? "", KnownMembership.Join)) {
-                        logger.info(`Ignoring membership of user ${membership.sender} who is not in the room.`);
+                        logger.debug(`Ignoring membership of user ${membership.sender} who is not in the room.`);
                         continue;
                     }
                     callMemberships.push(membership);
