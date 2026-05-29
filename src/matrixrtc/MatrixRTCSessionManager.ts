@@ -116,7 +116,13 @@ export class MatrixRTCSessionManager extends TypedEventEmitter<MatrixRTCSessionM
     private onRoomState = (event: MatrixEvent, _state: RoomState): void => {
         const room = this.client.getRoom(event.getRoomId());
         if (!room) {
-            this.logger.error(`Got room state event for unknown room ${event.getRoomId()}!`);
+            // Under sliding sync, state events are injected into a room's timeline (and
+            // re-emitted here) before the room is registered in the client store, so
+            // getRoom() is transiently null for most rooms on first sync. This fired
+            // hundreds of times and flooded the console. It is benign: RTC sessions are
+            // registered via the ClientEvent.Room -> onRoom -> refreshRoom path once the
+            // room is actually added, which re-reads call.member state. Demoted to debug.
+            this.logger.debug(`Got room state event for not-yet-stored room ${event.getRoomId()}; will refresh on ClientEvent.Room`);
             return;
         }
 
