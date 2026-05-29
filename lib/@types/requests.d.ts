@@ -107,6 +107,14 @@ export interface IPresenceOpts {
 export interface IPaginateOpts {
     backwards?: boolean;
     limit?: number;
+    /**
+     * If true, suppress {@link RoomEvent.Timeline} emission for events added by
+     * this pagination. Events are still added to the timeline (so the SDK's
+     * cache is populated for later use) but UI consumers don't re-render. Used
+     * for warmup/background backfill — populate without disturbing the user's
+     * current view.
+     */
+    quiet?: boolean;
 }
 export interface IGuestAccessOpts {
     /**

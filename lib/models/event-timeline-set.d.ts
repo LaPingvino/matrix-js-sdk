@@ -23,6 +23,14 @@ export interface IRoomTimelineData {
 export interface IAddEventToTimelineOptions extends Pick<IAddEventOptions, "toStartOfTimeline" | "roomState" | "timelineWasEmpty" | "addToState"> {
     /** Whether the sync response came from cache */
     fromCache?: boolean;
+    /**
+     * If true, suppress the {@link RoomEvent.Timeline} emit. The event is still
+     * added to the timeline (so relations aggregate, pagination tokens advance,
+     * future scrollback hits the cache) but UI consumers listening on the room
+     * are not woken up. Used for warmup/background backfill where the goal is
+     * to populate the SDK's event store without causing visible re-renders.
+     */
+    quiet?: boolean;
 }
 export interface IAddLiveEventOptions extends Pick<IAddEventToTimelineOptions, "fromCache" | "roomState" | "timelineWasEmpty" | "addToState"> {
     /** Applies to events in the timeline only. If this is 'replace' then if a
@@ -217,7 +225,7 @@ export declare class EventTimelineSet extends TypedEventEmitter<EmittedEvents, E
      * Fires {@link RoomEvent.Timeline}
      *
      */
-    addEventsToTimeline(events: MatrixEvent[], toStartOfTimeline: boolean, addToState: boolean, timeline: EventTimeline, paginationToken?: string | null): void;
+    addEventsToTimeline(events: MatrixEvent[], toStartOfTimeline: boolean, addToState: boolean, timeline: EventTimeline, paginationToken?: string | null, quiet?: boolean): void;
     /**
      * Add an event to the end of this live timeline.
      *
@@ -238,7 +246,7 @@ export declare class EventTimelineSet extends TypedEventEmitter<EmittedEvents, E
      * @remarks
      * Fires {@link RoomEvent.Timeline}
      */
-    addEventToTimeline(event: MatrixEvent, timeline: EventTimeline, { toStartOfTimeline, fromCache, roomState, timelineWasEmpty, addToState }: IAddEventToTimelineOptions): void;
+    addEventToTimeline(event: MatrixEvent, timeline: EventTimeline, { toStartOfTimeline, fromCache, roomState, timelineWasEmpty, addToState, quiet, }: IAddEventToTimelineOptions): void;
     /**
      * Insert event to the given timeline, and emit Room.timeline. Assumes
      * we have already checked we don't know about this event.
