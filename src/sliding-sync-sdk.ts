@@ -205,7 +205,9 @@ class ExtensionAccountData implements Extension<ExtensionAccountDataRequest, Ext
             const accountDataEvents = mapEvents(this.client, roomId, data.rooms[roomId]);
             const room = this.client.getRoom(roomId);
             if (!room) {
-                logger.warn("got account data for room but room doesn't exist on client:", roomId);
+                // Expected under sliding sync: extensions can carry data for
+                // rooms outside the current window. Not an error.
+                logger.debug("got account data for room but room doesn't exist on client:", roomId);
                 continue;
             }
             room.addAccountData(accountDataEvents);
@@ -353,19 +355,26 @@ export class SlidingSyncSdk {
     }
 
     private async onRoomData(roomId: string, roomData: MSC3575RoomData): Promise<void> {
-        let room = this.client.store.getRoom(roomId);
-        if (!room) {
-            if (!roomData.initial) {
-                this.syncOpts.logger.debug(
-                    "initial flag not set but no stored room exists for room ",
-                    roomId,
-                    roomData,
-                );
-                return;
+        try {
+            let room = this.client.store.getRoom(roomId);
+            if (!room) {
+                if (!roomData.initial) {
+                    this.syncOpts.logger.debug(
+                        "initial flag not set but no stored room exists for room ",
+                        roomId,
+                        roomData,
+                    );
+                    return;
+                }
+                room = _createAndReEmitRoom(this.client, roomId, this.opts);
             }
-            room = _createAndReEmitRoom(this.client, roomId, this.opts);
+            await this.processRoomData(this.client, room!, roomData);
+        } catch (e) {
+            // Resilience: one malformed room must not break sliding sync (it
+            // arrives per-room here, so an unhandled rejection would otherwise
+            // surface as a spurious error and skip nothing useful).
+            this.syncOpts.logger.error(`Failed to process sliding-sync data for room ${roomId}; skipping`, e);
         }
-        await this.processRoomData(this.client, room!, roomData);
     }
 
     private onLifecycle(state: SlidingSyncState, resp: MSC3575SlidingSyncResponse | null, err?: Error): void {
@@ -995,7 +1004,9 @@ function processEphemeralEvents(client: MatrixClient, roomId: string, ephEvents:
     const ephemeralEvents = mapEvents(client, roomId, ephEvents);
     const room = client.getRoom(roomId);
     if (!room) {
-        logger.warn("got ephemeral events for room but room doesn't exist on client:", roomId);
+        // Expected under sliding sync: ephemeral (typing/receipts) can arrive
+        // for rooms outside the current window. Not an error.
+        logger.debug("got ephemeral events for room but room doesn't exist on client:", roomId);
         return;
     }
     room.addEphemeralEvents(ephemeralEvents);

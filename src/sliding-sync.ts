@@ -335,6 +335,72 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
     }
 
     /**
+     * Convenience factory for the common "I want all my rooms" case, sized to
+     * scale to very large accounts. Builds two lists — a dedicated `spaces` list
+     * (spaces sort low by recency, so a plain window misses them) and a recency
+     * `all` list for everything else whose window grows automatically until it
+     * covers every room (small initial window = fast first paint). Opened rooms
+     * should still be added via {@link SlidingSync#modifyRoomSubscriptions}.
+     *
+     * Pass the result straight to `client.startClient({ slidingSync })`.
+     *
+     * @param client - The client to sync with.
+     * @param opts - Optional tuning (window size, growth step, required state,
+     *   timeline limits, request timeout).
+     */
+    public static create(
+        client: MatrixClient,
+        opts: {
+            requiredState?: string[][];
+            timelineLimit?: number;
+            roomSubscriptionTimelineLimit?: number;
+            windowSize?: number;
+            growBy?: number;
+            timeoutMS?: number;
+        } = {},
+    ): SlidingSync {
+        const requiredState = opts.requiredState ?? [["*", "*"]];
+        const windowSize = opts.windowSize ?? 100;
+        const growBy = opts.growBy ?? 200;
+        const lists = new Map<string, MSC3575List>([
+            [
+                "spaces",
+                {
+                    ranges: [[0, 199]],
+                    timeline_limit: 0,
+                    required_state: requiredState,
+                    filters: { room_types: ["m.space"] },
+                },
+            ],
+            [
+                "all",
+                {
+                    ranges: [[0, windowSize - 1]],
+                    timeline_limit: opts.timelineLimit ?? 1,
+                    required_state: requiredState,
+                    filters: { not_room_types: ["m.space"] },
+                },
+            ],
+        ]);
+        const roomSubscription: MSC3575RoomSubscription = {
+            timeline_limit: opts.roomSubscriptionTimelineLimit ?? 50,
+            required_state: requiredState,
+        };
+        const ss = new SlidingSync(client.baseUrl, lists, roomSubscription, client, opts.timeoutMS ?? 30_000);
+        // Grow the recency window until it covers every room, so consumers that
+        // want "all rooms" eventually get them without managing ranges.
+        ss.on(SlidingSyncEvent.Lifecycle, (state, _resp, err) => {
+            if (err || state !== SlidingSyncState.Complete) return;
+            const data = ss.getListData("all");
+            const end = ss.getListParams("all")?.ranges?.[0]?.[1] ?? windowSize - 1;
+            if (data && data.joinedCount > end + 1) {
+                ss.setListRanges("all", [[0, Math.min(end + growBy, data.joinedCount)]]);
+            }
+        });
+        return ss;
+    }
+
+    /**
      * Add a custom room subscription, referred to by an arbitrary name. If a subscription with this
      * name already exists, it is replaced. No requests are sent by calling this method.
      * @param name - The name of the subscription. Only used to reference this subscription in

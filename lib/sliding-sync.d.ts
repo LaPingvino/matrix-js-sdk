@@ -195,6 +195,28 @@ export declare class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, Sli
      */
     constructor(proxyBaseUrl: string, lists: Map<string, MSC3575List>, roomSubscriptionInfo: MSC3575RoomSubscription, client: MatrixClient, timeoutMS: number);
     /**
+     * Convenience factory for the common "I want all my rooms" case, sized to
+     * scale to very large accounts. Builds two lists — a dedicated `spaces` list
+     * (spaces sort low by recency, so a plain window misses them) and a recency
+     * `all` list for everything else whose window grows automatically until it
+     * covers every room (small initial window = fast first paint). Opened rooms
+     * should still be added via {@link SlidingSync#modifyRoomSubscriptions}.
+     *
+     * Pass the result straight to `client.startClient({ slidingSync })`.
+     *
+     * @param client - The client to sync with.
+     * @param opts - Optional tuning (window size, growth step, required state,
+     *   timeline limits, request timeout).
+     */
+    static create(client: MatrixClient, opts?: {
+        requiredState?: string[][];
+        timelineLimit?: number;
+        roomSubscriptionTimelineLimit?: number;
+        windowSize?: number;
+        growBy?: number;
+        timeoutMS?: number;
+    }): SlidingSync;
+    /**
      * Add a custom room subscription, referred to by an arbitrary name. If a subscription with this
      * name already exists, it is replaced. No requests are sent by calling this method.
      * @param name - The name of the subscription. Only used to reference this subscription in
