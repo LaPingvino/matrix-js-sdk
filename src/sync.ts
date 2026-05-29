@@ -1190,6 +1190,9 @@ export class SyncApi {
         // Handle invites
         await promiseMapSeries(inviteRooms, async (inviteObj) => {
             const room = inviteObj.room;
+            // See the joins loop below: process each room defensively so one
+            // bad room can't abort the batch and drop the rest.
+            try {
             const stateEvents = this.mapSyncEventsFormat(inviteObj.invite_state, room);
 
             await this.injectRoomEvents(room, stateEvents, undefined);
@@ -1205,6 +1208,12 @@ export class SyncApi {
             stateEvents.forEach(function (e) {
                 client.emit(ClientEvent.Event, e);
             });
+            } catch (e) {
+                this.syncOpts.logger.error(
+                    `Failed to process invited room ${room?.roomId ?? "?"} during sync; skipping it`,
+                    e,
+                );
+            }
         });
 
         // Handle joins
@@ -1431,6 +1440,7 @@ export class SyncApi {
         // Handle leaves (e.g. kicked rooms)
         await promiseMapSeries(leaveRooms, async (leaveObj) => {
             const room = leaveObj.room;
+            try {
             const { timelineEvents, stateEvents, stateAfterEvents } = await this.mapAndInjectRoomEvents(leaveObj);
             const accountDataEvents = this.mapSyncEventsFormat(leaveObj.account_data);
 
@@ -1456,11 +1466,18 @@ export class SyncApi {
             accountDataEvents.forEach(function (e) {
                 client.emit(ClientEvent.Event, e);
             });
+            } catch (e) {
+                this.syncOpts.logger.error(
+                    `Failed to process left room ${room?.roomId ?? "?"} during sync; skipping it`,
+                    e,
+                );
+            }
         });
 
         // Handle knocks
         await promiseMapSeries(knockRooms, async (knockObj) => {
             const room = knockObj.room;
+            try {
             const stateEvents = this.mapSyncEventsFormat(knockObj.knock_state, room);
 
             await this.injectRoomEvents(room, stateEvents, undefined);
@@ -1476,6 +1493,12 @@ export class SyncApi {
             stateEvents.forEach(function (e) {
                 client.emit(ClientEvent.Event, e);
             });
+            } catch (e) {
+                this.syncOpts.logger.error(
+                    `Failed to process knocked room ${room?.roomId ?? "?"} during sync; skipping it`,
+                    e,
+                );
+            }
         });
 
         // update the notification timeline, if appropriate.
