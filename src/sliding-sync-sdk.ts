@@ -53,7 +53,7 @@ import { EventType } from "./@types/event.ts";
 import { type IPushRules } from "./@types/PushRules.ts";
 import { RoomStateEvent } from "./models/room-state.ts";
 import { RoomMemberEvent } from "./models/room-member.ts";
-import { KnownMembership } from "./@types/membership.ts";
+import { KnownMembership, type Membership } from "./@types/membership.ts";
 
 // Number of consecutive failed syncs that will lead to a syncState of ERROR as opposed
 // to RECONNECTING. This is needed to inform the client of server issues when the
@@ -723,8 +723,21 @@ export class SlidingSyncSdk {
         room.addEphemeralEvents(ephemeralEvents);
 
         // local fields must be set before any async calls because call site assumes
-        // synchronous execution prior to emitting SlidingSyncState.Complete
-        room.updateMyMembership(KnownMembership.Join);
+        // synchronous execution prior to emitting SlidingSyncState.Complete.
+        // Derive our membership from the m.room.member state we just injected
+        // rather than assuming Join. Sliding-sync lists are over joined rooms, so
+        // Join is the right DEFAULT, but a subscribed room (e.g. a space child we
+        // are only previewing) or a room whose required_state carries a leave/ban
+        // for us must reflect that — otherwise consumers see a not-joined room as
+        // joined. Falls back to Join when the self member event isn't present
+        // (e.g. the consumer didn't request m.room.member/$ME in required_state),
+        // preserving the previous behavior.
+        const selfUserId = client.getUserId();
+        const selfMember = selfUserId
+            ? room.currentState.getStateEvents(EventType.RoomMember, selfUserId)
+            : null;
+        const selfMembership = (selfMember?.getContent() as { membership?: string } | undefined)?.membership;
+        room.updateMyMembership((selfMembership as Membership) ?? KnownMembership.Join);
 
         room.setMSC4186SummaryData(roomData.heroes, roomData.joined_count, roomData.invited_count);
 
