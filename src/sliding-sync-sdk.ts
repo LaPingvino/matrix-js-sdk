@@ -1003,6 +1003,18 @@ function ensureNameEvent(client: MatrixClient, roomId: string, roomData: MSC3575
             return roomData;
         }
     }
+    // No existing m.room.name. For DMs / unnamed rooms the server sends `heroes`,
+    // and the client's calculateRoomName() builds a BETTER name from them — it
+    // excludes ourselves and functional (bridge-bot) members — than the server's
+    // computed `name`, which for a DM or a bridged chat can read as
+    // "me, other + WhatsApp bot". Fabricating an m.room.name from the server name
+    // would OVERRIDE that good hero-based calculation. So when heroes are present,
+    // don't fabricate — let the client compute the name from heroes. Only
+    // fabricate when there is no hero signal, so the server name is still
+    // surfaced for named rooms that omitted m.room.name from required_state.
+    if (Array.isArray(roomData.heroes) && roomData.heroes.length > 0) {
+        return roomData;
+    }
     roomData.required_state.push({
         event_id: "$fake-sliding-sync-name-event-" + roomId,
         state_key: "",
