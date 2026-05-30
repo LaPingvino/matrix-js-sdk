@@ -49,7 +49,7 @@ import {
     SlidingSyncEvent,
     SlidingSyncState,
 } from "./sliding-sync.ts";
-import { EventType } from "./@types/event.ts";
+import { EventType, UNSTABLE_ELEMENT_FUNCTIONAL_USERS } from "./@types/event.ts";
 import { type IPushRules } from "./@types/PushRules.ts";
 import { RoomStateEvent } from "./models/room-state.ts";
 import { RoomMemberEvent } from "./models/room-member.ts";
@@ -1003,29 +1003,50 @@ function ensureNameEvent(client: MatrixClient, roomId: string, roomData: MSC3575
             return roomData;
         }
     }
-    // No existing m.room.name. For DMs / unnamed rooms the server sends `heroes`,
-    // and the client's calculateRoomName() builds a BETTER name from them — it
-    // excludes ourselves and functional (bridge-bot) members — than the server's
-    // computed `name`, which for a DM or a bridged chat can read as
-    // "me, other + WhatsApp bot". Fabricating an m.room.name from the server name
-    // would OVERRIDE that good hero-based calculation. So when heroes are present,
-    // don't fabricate — let the client compute the name from heroes. Only
-    // fabricate when there is no hero signal, so the server name is still
-    // surfaced for named rooms that omitted m.room.name from required_state.
-    if (Array.isArray(roomData.heroes) && roomData.heroes.length > 0) {
-        return roomData;
-    }
+    // No existing m.room.name → fabricate one. For DMs / unnamed rooms the
+    // server's computed `name` can read as "me, other + WhatsApp bot": it can
+    // fold in ourselves and bridge bots. So fabricate the name the way a client
+    // would compute it — from `heroes`, excluding functional (bridge-bot)
+    // members — and only fall back to the server `name` when there is no hero
+    // signal (so named rooms that omitted m.room.name still surface a name).
+    const heroName = dmNameFromHeroes(roomData);
     roomData.required_state.push({
         event_id: "$fake-sliding-sync-name-event-" + roomId,
         state_key: "",
         type: EventType.RoomName,
         content: {
-            name: roomData.name,
+            name: heroName ?? roomData.name,
         },
         sender: client.getUserId()!,
         origin_server_ts: new Date().getTime(),
     });
     return roomData;
+}
+
+/**
+ * Compute a DM/group room name from the MSC4186 `heroes` summary the way a
+ * client does: the other member(s)' display names, excluding functional
+ * (bridge-bot) members listed in any io.element.functional_members state event
+ * present in required_state. `heroes` already excludes the syncing user.
+ * Returns undefined when there are no usable heroes.
+ */
+function dmNameFromHeroes(roomData: MSC3575RoomData): string | undefined {
+    const heroes = roomData.heroes;
+    if (!Array.isArray(heroes) || heroes.length === 0) return undefined;
+
+    const functional = new Set<string>();
+    for (const ev of roomData.required_state ?? []) {
+        if (ev.type === UNSTABLE_ELEMENT_FUNCTIONAL_USERS.name && ev.state_key === "") {
+            const svc = (ev.content as { service_members?: string[] })?.service_members;
+            if (Array.isArray(svc)) svc.forEach((u) => functional.add(u));
+        }
+    }
+
+    const names = heroes.filter((h) => !functional.has(h.user_id)).map((h) => h.displayname || h.user_id);
+    if (names.length === 0) return undefined;
+    if (names.length === 1) return names[0];
+    if (names.length === 2) return `${names[0]} and ${names[1]}`;
+    return `${names[0]} and ${names.length - 1} others`;
 }
 
 type TaggedEvent = (IStrippedState | IRoomEvent | IStateEvent | IMinimalEvent) & { room_id?: string };

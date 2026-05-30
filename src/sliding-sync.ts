@@ -327,6 +327,7 @@ export const DEFAULT_SLIDING_SYNC_REQUIRED_STATE: string[][] = [
     ["m.room.encryption", ""],
     ["m.room.member", MSC3575_STATE_KEY_ME],
     ["m.room.member", MSC3575_STATE_KEY_LAZY],
+    ["io.element.functional_members", ""], // bridge-bot list, so DM names exclude bots
     ["m.space.parent", MSC3575_WILDCARD],
     ["org.matrix.msc3401.call.member", MSC3575_WILDCARD],
     ["m.rtc.member", MSC3575_WILDCARD],
