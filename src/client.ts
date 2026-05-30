@@ -8352,6 +8352,16 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
     }
 
     /**
+     * The {@link SlidingSync} instance driving sync, if any — whether passed
+     * explicitly to {@link MatrixClient.startClient} or auto-built by the
+     * MSC4186 auto-enable path. Returns undefined under classic `/sync`.
+     * Use it to manage room subscriptions (`modifyRoomSubscriptions`) etc.
+     */
+    public getSlidingSync(): SlidingSync | undefined {
+        return this.clientOpts?.slidingSync;
+    }
+
+    /**
      * Perform a single MSC3575 sliding sync request.
      * @param req - The request to make.
      * @param proxyBaseUrl - The base URL for the sliding sync proxy.
