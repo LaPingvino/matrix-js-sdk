@@ -396,14 +396,20 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
             required_state: subscriptionRequiredState,
         };
         const ss = new SlidingSync(client.baseUrl, lists, roomSubscription, client, opts.timeoutMS ?? 30_000);
-        // Grow the recency window until it covers every room, so consumers that
-        // want "all rooms" eventually get them without managing ranges.
+        // Grow each list's window until it covers every room the server reports
+        // for that list, so consumers that want "all rooms" / "all spaces"
+        // eventually get them without managing ranges. The spaces list needs
+        // this too: on a server that doesn't honour the room_types filter it
+        // degrades to a recency list, so the low-sorting space rooms sit beyond
+        // the initial window until it grows to cover them.
         ss.on(SlidingSyncEvent.Lifecycle, (state, _resp, err) => {
             if (err || state !== SlidingSyncState.Complete) return;
-            const data = ss.getListData("all");
-            const end = ss.getListParams("all")?.ranges?.[0]?.[1] ?? windowSize - 1;
-            if (data && data.joinedCount > end + 1) {
-                ss.setListRanges("all", [[0, Math.min(end + growBy, data.joinedCount)]]);
+            for (const key of ["all", "spaces"]) {
+                const data = ss.getListData(key);
+                const end = ss.getListParams(key)?.ranges?.[0]?.[1] ?? windowSize - 1;
+                if (data && data.joinedCount > end + 1) {
+                    ss.setListRanges(key, [[0, Math.min(end + growBy, data.joinedCount)]]);
+                }
             }
         });
         return ss;
