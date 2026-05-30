@@ -800,6 +800,15 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
      * @returns the timestamp of the last message in the room
      */
     public getLastActiveTimestamp(): number {
+        // Prefer the server's MSC4186 sliding-sync bump_stamp: it tracks the last
+        // MEANINGFUL activity and excludes trailing state events (member changes,
+        // eu.kiefte.issue edits) that must NOT re-float a room in the list.
+        // Observed live: a room whose last timeline event is an issue edit still
+        // has a bump_stamp pointing at the last actual message. Falls back to the
+        // last timeline event's ts under classic /sync (no bump_stamp set).
+        if (this.bumpStamp !== undefined) {
+            return this.bumpStamp;
+        }
         const timeline = this.getLiveTimeline();
         const events = timeline.getEvents();
         if (events.length) {
