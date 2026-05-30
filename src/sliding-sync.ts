@@ -420,7 +420,6 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
         const spacesRequiredState = opts.spacesRequiredState ?? DEFAULT_SLIDING_SYNC_SPACES_REQUIRED_STATE;
         const subscriptionRequiredState = opts.subscriptionRequiredState ?? DEFAULT_SLIDING_SYNC_SPACES_REQUIRED_STATE;
         const windowSize = opts.windowSize ?? 100;
-        const growBy = opts.growBy ?? 200;
         const lists = new Map<string, MSC3575List>([
             [
                 "spaces",
@@ -446,21 +445,36 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
             required_state: subscriptionRequiredState,
         };
         const ss = new SlidingSync(client.baseUrl, lists, roomSubscription, client, opts.timeoutMS ?? 30_000);
-        // Grow each list's window until it covers every room the server reports
-        // for that list, so consumers that want "all rooms" / "all spaces"
-        // eventually get them without managing ranges. The spaces list needs
-        // this too: on a server that doesn't honour the room_types filter it
-        // degrades to a recency list, so the low-sorting space rooms sit beyond
-        // the initial window until it grows to cover them.
+        // Grow each list's window to cover EVERY room the server reports for that
+        // list, so consumers that want "all rooms" / "all spaces" reliably get
+        // them without managing ranges. The spaces list needs this too: on a
+        // server that doesn't honour the room_types filter it degrades to a
+        // recency list, so low-sorting space rooms sit beyond the initial window.
+        //
+        // We jump straight to full coverage (`[0, joinedCount]`) the first time a
+        // sync reveals the count, rather than growing by `growBy` per sync. The
+        // incremental approach needed N round-trips for N*growBy rooms — and on a
+        // flaky link, where Complete events are rare, the window could stall and
+        // never cover a large spaces list (a reported regression). The small
+        // initial window still gives a fast first paint; this one extra growth
+        // step then guarantees completeness. `growBy` is kept for API compat but
+        // only caps how far a SINGLE step may jump (defaults large enough to
+        // cover normal accounts in one go).
+        const growStep = (key: string): void => {
+            const data = ss.getListData(key);
+            if (!data) return;
+            const end = ss.getListParams(key)?.ranges?.[0]?.[1] ?? windowSize - 1;
+            if (data.joinedCount > end + 1) {
+                // Default: jump straight to full coverage so the list completes in
+                // ONE growth step (robust on flaky links). If a caller passed an
+                // explicit growBy, honour it as a per-step cap instead.
+                const target = opts.growBy ? Math.min(end + opts.growBy, data.joinedCount) : data.joinedCount;
+                ss.setListRanges(key, [[0, target]]);
+            }
+        };
         ss.on(SlidingSyncEvent.Lifecycle, (state, _resp, err) => {
             if (err || state !== SlidingSyncState.Complete) return;
-            for (const key of ["all", "spaces"]) {
-                const data = ss.getListData(key);
-                const end = ss.getListParams(key)?.ranges?.[0]?.[1] ?? windowSize - 1;
-                if (data && data.joinedCount > end + 1) {
-                    ss.setListRanges(key, [[0, Math.min(end + growBy, data.joinedCount)]]);
-                }
-            }
+            for (const key of ["all", "spaces"]) growStep(key);
         });
         return ss;
     }
