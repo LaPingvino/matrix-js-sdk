@@ -164,6 +164,44 @@ export type SlidingSyncEventHandlerMap = {
     [SlidingSyncEvent.Lifecycle]: (state: SlidingSyncState, resp: MSC3575SlidingSyncResponse | null, err?: Error) => void;
 };
 /**
+ * Tuning for {@link SlidingSync.create} (and the auto-enable path in
+ * `MatrixClient.startClient`). All fields are optional; the defaults give a
+ * fast first paint (small windows, 1 event/room) with windows that grow to
+ * cover every room.
+ */
+export interface SlidingSyncCreateOpts {
+    /** required_state for the recency "all" list. Default {@link DEFAULT_SLIDING_SYNC_REQUIRED_STATE}. */
+    requiredState?: string[][];
+    /** required_state for the dedicated spaces list. Default {@link DEFAULT_SLIDING_SYNC_SPACES_REQUIRED_STATE}. */
+    spacesRequiredState?: string[][];
+    /** required_state for opened-room subscriptions. Default {@link DEFAULT_SLIDING_SYNC_SPACES_REQUIRED_STATE}. */
+    subscriptionRequiredState?: string[][];
+    /** timeline_limit for the recency list. Default 1 (inflate on demand). */
+    timelineLimit?: number;
+    /** timeline_limit for opened-room subscriptions. Default 50. */
+    roomSubscriptionTimelineLimit?: number;
+    /** initial list window size. Default 100. */
+    windowSize?: number;
+    /** how much to grow a list window by per step until it covers every room. Default 200. */
+    growBy?: number;
+    /** request timeout in ms. Default 30000. */
+    timeoutMS?: number;
+}
+/**
+ * Lean default required_state for the recency "all" list: just what an inbox
+ * row + bundling + incoming-call detection need, so first paint stays fast.
+ * Explicit because some servers (e.g. Continuwuity) do NOT honour the
+ * `["*","*"]` wildcard — leaving rooms with no usable state. Callers can
+ * override via {@link SlidingSyncCreateOpts.requiredState}.
+ */
+export declare const DEFAULT_SLIDING_SYNC_REQUIRED_STATE: string[][];
+/**
+ * Default required_state for the spaces list and opened-room subscriptions:
+ * the lean set PLUS the heavier hierarchy/power/widget/emoji state. The spaces
+ * list needs `m.space.child`; opened rooms want everything.
+ */
+export declare const DEFAULT_SLIDING_SYNC_SPACES_REQUIRED_STATE: string[][];
+/**
  * SlidingSync is a high-level data structure which controls the majority of sliding sync.
  * It has no hooks into JS SDK except for needing a MatrixClient to perform the HTTP request.
  * This means this class (and everything it uses) can be used in isolation from JS SDK if needed.
@@ -208,16 +246,7 @@ export declare class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, Sli
      * @param opts - Optional tuning (window size, growth step, required state,
      *   timeline limits, request timeout).
      */
-    static create(client: MatrixClient, opts?: {
-        requiredState?: string[][];
-        spacesRequiredState?: string[][];
-        subscriptionRequiredState?: string[][];
-        timelineLimit?: number;
-        roomSubscriptionTimelineLimit?: number;
-        windowSize?: number;
-        growBy?: number;
-        timeoutMS?: number;
-    }): SlidingSync;
+    static create(client: MatrixClient, opts?: SlidingSyncCreateOpts): SlidingSync;
     /**
      * Add a custom room subscription, referred to by an arbitrary name. If a subscription with this
      * name already exists, it is replaced. No requests are sent by calling this method.

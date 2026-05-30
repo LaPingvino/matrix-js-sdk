@@ -200,7 +200,12 @@ import {
 } from "./@types/auth.ts";
 import { TypedEventEmitter } from "./models/typed-event-emitter.ts";
 import { MAIN_ROOM_TIMELINE, ReceiptType } from "./@types/read_receipts.ts";
-import { type MSC3575SlidingSyncRequest, type MSC3575SlidingSyncResponse, type SlidingSync } from "./sliding-sync.ts";
+import {
+    type MSC3575SlidingSyncRequest,
+    type MSC3575SlidingSyncResponse,
+    SlidingSync,
+    type SlidingSyncCreateOpts,
+} from "./sliding-sync.ts";
 import { SlidingSyncSdk } from "./sliding-sync-sdk.ts";
 import {
     determineFeatureSupport,
@@ -525,8 +530,27 @@ export interface IStartClientOpts {
 
     /**
      * @experimental
+     * An explicit {@link SlidingSync} instance to drive sync with. When set,
+     * it is used as-is and the auto-enable path below is skipped.
      */
     slidingSync?: SlidingSync;
+
+    /**
+     * @experimental
+     * Auto-enable simplified sliding sync (MSC4186/MSC3575) when the server
+     * advertises it and no explicit {@link IStartClientOpts.slidingSync}
+     * instance was passed. Defaults to `true`, so a plain `startClient()`
+     * transparently gets sliding sync on a capable server. Set `false` to
+     * force classic `/sync`.
+     */
+    autoSlidingSync?: boolean;
+
+    /**
+     * @experimental
+     * Tuning for the auto-enabled sliding sync (see {@link SlidingSyncCreateOpts}).
+     * Ignored when an explicit {@link IStartClientOpts.slidingSync} is passed.
+     */
+    slidingSyncOpts?: SlidingSyncCreateOpts;
 
     /**
      * Opt in to a more aggressively-lazy mode that prioritises a fast initial
@@ -1494,6 +1518,16 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             }
             if (this.clientOpts.initialSyncLimit === undefined) {
                 this.clientOpts.initialSyncLimit = 1;
+            }
+        }
+        // Auto-enable simplified sliding sync (MSC4186/MSC3575) when the server
+        // advertises it and the caller didn't pass an explicit instance or opt
+        // out. This makes sliding sync transparent: a plain startClient() picks
+        // it up on a capable server, with the baked-in lean required_state.
+        if (!this.clientOpts.slidingSync && this.clientOpts.autoSlidingSync !== false) {
+            if (await this.serverSupportsSimplifiedSlidingSync()) {
+                this.logger.info("Auto-enabling simplified sliding sync (server advertises MSC4186/MSC3575)");
+                this.clientOpts.slidingSync = SlidingSync.create(this, this.clientOpts.slidingSyncOpts ?? {});
             }
         }
         if (this.clientOpts.slidingSync) {
@@ -5907,6 +5941,26 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         this.canSupport = await buildFeatureSupportMap(serverVersions);
 
         return this.serverVersionsPromise;
+    }
+
+    /**
+     * Whether the server advertises simplified sliding sync (MSC4186) or the
+     * earlier MSC3575, via an unstable_features flag in /versions. Used by the
+     * auto-enable path in {@link MatrixClient.startClient}. Swallows errors
+     * (treats an unreachable /versions as "not supported" so sync still starts
+     * on classic /sync).
+     */
+    public async serverSupportsSimplifiedSlidingSync(): Promise<boolean> {
+        try {
+            const { unstable_features: uf } = await this.getVersions();
+            return !!(
+                uf?.["org.matrix.simplified_msc3575"] ||
+                uf?.["org.matrix.msc3575"] ||
+                uf?.["org.matrix.msc4186"]
+            );
+        } catch {
+            return false;
+        }
     }
 
     /**

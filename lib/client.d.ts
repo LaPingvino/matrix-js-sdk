@@ -45,7 +45,7 @@ import { MediaHandler } from "./webrtc/mediaHandler.ts";
 import { type ILoginFlowsResponse, type IRefreshTokenResponse, type LoginRequest, type LoginResponse, type LoginTokenPostResponse, type SSOAction } from "./@types/auth.ts";
 import { TypedEventEmitter } from "./models/typed-event-emitter.ts";
 import { ReceiptType } from "./@types/read_receipts.ts";
-import { type MSC3575SlidingSyncRequest, type MSC3575SlidingSyncResponse, type SlidingSync } from "./sliding-sync.ts";
+import { type MSC3575SlidingSyncRequest, type MSC3575SlidingSyncResponse, SlidingSync, type SlidingSyncCreateOpts } from "./sliding-sync.ts";
 import { SlidingSyncSdk } from "./sliding-sync-sdk.ts";
 import { FeatureSupport, ThreadFilterType } from "./models/thread.ts";
 import { type MBeaconInfoEventContent } from "./@types/beacon.ts";
@@ -288,8 +288,25 @@ export interface IStartClientOpts {
     threadSupport?: boolean;
     /**
      * @experimental
+     * An explicit {@link SlidingSync} instance to drive sync with. When set,
+     * it is used as-is and the auto-enable path below is skipped.
      */
     slidingSync?: SlidingSync;
+    /**
+     * @experimental
+     * Auto-enable simplified sliding sync (MSC4186/MSC3575) when the server
+     * advertises it and no explicit {@link IStartClientOpts.slidingSync}
+     * instance was passed. Defaults to `true`, so a plain `startClient()`
+     * transparently gets sliding sync on a capable server. Set `false` to
+     * force classic `/sync`.
+     */
+    autoSlidingSync?: boolean;
+    /**
+     * @experimental
+     * Tuning for the auto-enabled sliding sync (see {@link SlidingSyncCreateOpts}).
+     * Ignored when an explicit {@link IStartClientOpts.slidingSync} is passed.
+     */
+    slidingSyncOpts?: SlidingSyncCreateOpts;
     /**
      * Opt in to a more aggressively-lazy mode that prioritises a fast initial
      * sync over having a fully-populated cache. Recommended for clients that
@@ -2131,6 +2148,14 @@ export declare class MatrixClient extends TypedEventEmitter<EmittedEvents, Clien
      * @returns The server /versions response
      */
     getVersions(): Promise<IServerVersions>;
+    /**
+     * Whether the server advertises simplified sliding sync (MSC4186) or the
+     * earlier MSC3575, via an unstable_features flag in /versions. Used by the
+     * auto-enable path in {@link MatrixClient.startClient}. Swallows errors
+     * (treats an unreachable /versions as "not supported" so sync still starts
+     * on classic /sync).
+     */
+    serverSupportsSimplifiedSlidingSync(): Promise<boolean>;
     /**
      * Check if a particular spec version is supported by the server.
      * @param version - The spec version (such as "r0.5.0") to check for.
