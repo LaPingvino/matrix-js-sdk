@@ -3599,26 +3599,8 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         unthreaded = false,
     ): Promise<EmptyObject | undefined> {
         if (!event) return;
-        const room = this.getRoom(event.getRoomId());
-        // A read receipt pointed at a STATE event (e.g. a trailing
-        // eu.kiefte.issue or m.room.member event that is the last thing in the
-        // timeline) is rejected by some servers (Continuwuity), which throws and
-        // leaves the room stuck unread. Redirect to the last non-state (message)
-        // event at or before the requested one, so "mark read" works regardless
-        // of what trails the conversation. Falls back to the original event when
-        // the loaded timeline has no message event.
-        if (event.isState() && room) {
-            const events = room.getLiveTimeline().getEvents();
-            const requestedIdx = events.findIndex((e) => e.getId() === event!.getId());
-            const from = requestedIdx === -1 ? events.length - 1 : requestedIdx;
-            for (let i = from; i >= 0; i -= 1) {
-                if (!events[i].isState()) {
-                    event = events[i];
-                    break;
-                }
-            }
-        }
         const eventId = event.getId()!;
+        const room = this.getRoom(event.getRoomId());
         if (room?.hasPendingEvent(eventId)) {
             throw new Error(`Cannot set read receipt to a pending event (${eventId})`);
         }
