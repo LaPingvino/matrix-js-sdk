@@ -986,6 +986,33 @@ export class SlidingSyncSdk {
                     const prev = this.client.store.getAccountData(type);
                     this.client.store.storeAccountDataEvents([ev]);
                     this.client.emit(ClientEvent.AccountData, ev, prev);
+
+                    // A DM's identity IS its people, so a DM room that sorts
+                    // below the sliding window — and therefore never lands in
+                    // the store — shows as a missing/empty entry even though
+                    // m.direct maps it. Subscribe to every m.direct room so it
+                    // materialises regardless of recency, the same way an
+                    // opened room does. (Merge into the existing subscription
+                    // set so app-driven subscriptions aren't clobbered.)
+                    if (type === EventType.Direct && content && typeof content === "object") {
+                        const dmRoomIds = new Set<string>();
+                        for (const rooms of Object.values(content as unknown as Record<string, unknown>)) {
+                            if (Array.isArray(rooms)) {
+                                for (const r of rooms) if (typeof r === "string") dmRoomIds.add(r);
+                            }
+                        }
+                        if (dmRoomIds.size) {
+                            const subs = this.slidingSync.getRoomSubscriptions();
+                            let added = false;
+                            for (const id of dmRoomIds) {
+                                if (!subs.has(id)) {
+                                    subs.add(id);
+                                    added = true;
+                                }
+                            }
+                            if (added) this.slidingSync.modifyRoomSubscriptions(subs);
+                        }
+                    }
                 } catch {
                     /* not set / unreachable — non-fatal */
                 }
