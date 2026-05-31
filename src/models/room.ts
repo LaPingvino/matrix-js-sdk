@@ -894,10 +894,41 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
     }
 
     /**
+     * The canonical DM partner for this room, taken from the user's `m.direct`
+     * account data (which user has this room id in their list), excluding the
+     * syncing user. This is the AUTHORITATIVE source of DM identity — heroes can
+     * be empty/incomplete under sliding sync, can include the syncing user, or
+     * include a bridge bot, so they must not be the primary signal for "who is
+     * this DM with". Mirrors the Rust SDK's `direct_targets()` (driven by
+     * `m.direct`, not heroes).
+     *
+     * @returns the other party's user id, or null if this room is not a DM
+     *     according to `m.direct`.
+     */
+    public getDirectUserId(): string | null {
+        const content = this.client.getAccountData(EventType.Direct)?.getContent<Record<string, string[]>>();
+        if (!content) return null;
+        for (const userId in content) {
+            if (userId === this.myUserId) continue;
+            const roomIds = content[userId];
+            if (Array.isArray(roomIds) && roomIds.includes(this.roomId)) {
+                return userId;
+            }
+        }
+        return null;
+    }
+
+    /**
      * Assuming this room is a DM room, tries to guess with which user.
      * @returns user id of the other member (could be syncing user)
      */
     public guessDMUserId(): string {
+        // Prefer m.direct: it names the real other party even when heroes are
+        // missing/degenerate (the case that showed self, a bot, or an mxid).
+        const directUserId = this.getDirectUserId();
+        if (directUserId) {
+            return directUserId;
+        }
         const me = this.getMember(this.myUserId);
         if (me) {
             const inviterId = me.getDMInviter();
@@ -907,7 +938,10 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
         }
         // Remember, we're assuming this room is a DM, so returning the first member we find should be fine
         if (Array.isArray(this.heroes) && this.heroes.length) {
-            return this.heroes[0].userId;
+            // Defensive: a buggy server can list the syncing user as a hero;
+            // never guess ourselves as the DM partner if another hero exists.
+            const otherHero = this.heroes.find((h) => h.userId !== this.myUserId) ?? this.heroes[0];
+            return otherHero.userId;
         }
         const members = this.currentState.getMembers();
         const anyMember = members.find((m) => m.userId !== this.myUserId);
@@ -938,6 +972,16 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
 
     public getAvatarFallbackMember(): RoomMember | undefined {
         const functionalMembers = this.getFunctionalMembers();
+
+        // Prefer the canonical m.direct partner when this is a DM: heroes can be
+        // empty/degenerate under sliding sync, so trust m.direct for identity and
+        // only fall through to the heroes/member heuristics below when we don't
+        // yet hold that member (then their profile fills in from heroes).
+        const directUserId = this.getDirectUserId();
+        if (directUserId) {
+            const directMember = this.getMember(directUserId);
+            if (directMember) return directMember;
+        }
 
         // Only generate a fallback avatar if the conversation is with a single specific other user (a "DM").
         let nonFunctionalMemberCount = 0;

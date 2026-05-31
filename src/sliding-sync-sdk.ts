@@ -1020,7 +1020,7 @@ function ensureNameEvent(client: MatrixClient, roomId: string, roomData: MSC3575
     // would compute it — from `heroes`, excluding functional (bridge-bot)
     // members — and only fall back to the server `name` when there is no hero
     // signal (so named rooms that omitted m.room.name still surface a name).
-    const heroName = dmNameFromHeroes(roomData);
+    const heroName = dmNameFromHeroes(roomData, client.getUserId());
     roomData.required_state.push({
         event_id: "$fake-sliding-sync-name-event-" + roomId,
         state_key: "",
@@ -1041,19 +1041,31 @@ function ensureNameEvent(client: MatrixClient, roomId: string, roomData: MSC3575
  * present in required_state. `heroes` already excludes the syncing user.
  * Returns undefined when there are no usable heroes.
  */
-function dmNameFromHeroes(roomData: MSC3575RoomData): string | undefined {
+function dmNameFromHeroes(roomData: MSC3575RoomData, selfUserId?: string | null): string | undefined {
     const heroes = roomData.heroes;
     if (!Array.isArray(heroes) || heroes.length === 0) return undefined;
 
     const functional = new Set<string>();
+    // Display names from any m.room.member events in required_state, so a hero
+    // whose summary entry has no inline displayname (Continuwuity often omits it)
+    // still resolves to a real name instead of a bare mxid.
+    const memberNames = new Map<string, string>();
     for (const ev of roomData.required_state ?? []) {
         if (ev.type === UNSTABLE_ELEMENT_FUNCTIONAL_USERS.name && ev.state_key === "") {
             const svc = (ev.content as { service_members?: string[] })?.service_members;
             if (Array.isArray(svc)) svc.forEach((u) => functional.add(u));
+        } else if (ev.type === EventType.RoomMember && typeof ev.state_key === "string") {
+            const dn = (ev.content as { displayname?: string })?.displayname;
+            if (dn) memberNames.set(ev.state_key, dn);
         }
     }
 
-    const names = heroes.filter((h) => !functional.has(h.user_id)).map((h) => h.displayname || h.user_id);
+    // Exclude functional (bridge-bot) members AND the syncing user — a buggy
+    // server can list us among the heroes, which used to fold "me" into the name.
+    const usable = heroes.filter((h) => !functional.has(h.user_id) && h.user_id !== selfUserId);
+    // Real name preference: hero's inline displayname → member-event displayname
+    // → mxid only as a last resort (a contact whose profile we truly lack yet).
+    const names = usable.map((h) => h.displayname || memberNames.get(h.user_id) || h.user_id);
     if (names.length === 0) return undefined;
     if (names.length === 1) return names[0];
     if (names.length === 2) return `${names[0]} and ${names[1]}`;

@@ -461,6 +461,19 @@ export declare class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandle
      */
     getDMInviter(): string | undefined;
     /**
+     * The canonical DM partner for this room, taken from the user's `m.direct`
+     * account data (which user has this room id in their list), excluding the
+     * syncing user. This is the AUTHORITATIVE source of DM identity — heroes can
+     * be empty/incomplete under sliding sync, can include the syncing user, or
+     * include a bridge bot, so they must not be the primary signal for "who is
+     * this DM with". Mirrors the Rust SDK's `direct_targets()` (driven by
+     * `m.direct`, not heroes).
+     *
+     * @returns the other party's user id, or null if this room is not a DM
+     *     according to `m.direct`.
+     */
+    getDirectUserId(): string | null;
+    /**
      * Assuming this room is a DM room, tries to guess with which user.
      * @returns user id of the other member (could be syncing user)
      */

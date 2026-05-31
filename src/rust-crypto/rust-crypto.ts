@@ -299,8 +299,12 @@ export class RustCrypto extends TypedEventEmitter<RustCryptoEvents, CryptoEventH
             throw new Error(`getBackupDecryptor: expects Uint8Array`);
         }
 
-        if (backupInfo.algorithm != "m.megolm_backup.v1.curve25519-aes-sha2") {
-            throw new Error(`getBackupDecryptor: Unsupported algorithm ${backupInfo.algorithm}`);
+        // Guard against a missing backupInfo: callers can reach here when the
+        // server backup is absent or untrusted, and reading `.algorithm` off
+        // undefined throws a cryptic "Cannot read properties of undefined" that
+        // surfaces as a setup-flow crash. Fail with a clear, catchable error.
+        if (backupInfo?.algorithm != "m.megolm_backup.v1.curve25519-aes-sha2") {
+            throw new Error(`getBackupDecryptor: Unsupported algorithm ${backupInfo?.algorithm}`);
         }
 
         const backupDecryptionKey = RustSdkCryptoJs.BackupDecryptionKey.fromBase64(encodeBase64(privKey));
