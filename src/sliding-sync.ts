@@ -785,14 +785,25 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
                 this.lists.forEach((l: SlidingList, key: string) => {
                     reqLists[key] = l.getList(true);
                 });
-                const effectiveTimeout = boostPolls > 0 ? Math.min(BOOST_TIMEOUT_MS, this.timeoutMS) : this.timeoutMS;
-                if (boostPolls > 0) boostPolls -= 1;
+                // The very first request of a connection (no pos) must return the
+                // initial window IMMEDIATELY rather than long-poll — the priority
+                // rooms should paint before any timeout. timeout=0 means "send what
+                // you have now". After that we long-poll (or fast-poll during a
+                // to-device handshake). A 400/expiry resets pos, so a re-init is
+                // fast too.
+                const isInitial = currentPos === undefined;
+                const effectiveTimeout = isInitial
+                    ? 0
+                    : boostPolls > 0
+                      ? Math.min(BOOST_TIMEOUT_MS, this.timeoutMS)
+                      : this.timeoutMS;
+                if (!isInitial && boostPolls > 0) boostPolls -= 1;
                 const reqBody: MSC3575SlidingSyncRequest = {
                     lists: reqLists,
                     pos: currentPos,
                     timeout: effectiveTimeout,
                     clientTimeout: effectiveTimeout + BUFFER_PERIOD_MS,
-                    extensions: await this.getExtensionRequest(currentPos === undefined),
+                    extensions: await this.getExtensionRequest(isInitial),
                     ...(this.connId ? { conn_id: this.connId } : {}),
                 };
                 // check if we are (un)subscribing to a room and modify request this one time for it
