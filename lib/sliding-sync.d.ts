@@ -184,7 +184,11 @@ export interface SlidingSyncCreateOpts {
     windowSize?: number;
     /** how much to grow a list window by per step until it covers every room. Default 200. */
     growBy?: number;
-    /** request timeout in ms. Default 30000. */
+    /** request timeout in ms. Default 10000. Shorter than classic /sync because
+     * Continuwuity's sliding sync holds the long-poll for the full timeout rather
+     * than returning immediately on new to-device/data, so a long timeout makes
+     * "immediate" things (verification handshakes, key shares, new messages) lag.
+     */
     timeoutMS?: number;
 }
 /**

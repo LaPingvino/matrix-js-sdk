@@ -307,7 +307,11 @@ export interface SlidingSyncCreateOpts {
     windowSize?: number;
     /** how much to grow a list window by per step until it covers every room. Default 200. */
     growBy?: number;
-    /** request timeout in ms. Default 30000. */
+    /** request timeout in ms. Default 10000. Shorter than classic /sync because
+     * Continuwuity's sliding sync holds the long-poll for the full timeout rather
+     * than returning immediately on new to-device/data, so a long timeout makes
+     * "immediate" things (verification handshakes, key shares, new messages) lag.
+     */
     timeoutMS?: number;
 }
 
@@ -445,7 +449,7 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
             timeline_limit: opts.roomSubscriptionTimelineLimit ?? 50,
             required_state: subscriptionRequiredState,
         };
-        const ss = new SlidingSync(client.baseUrl, lists, roomSubscription, client, opts.timeoutMS ?? 30_000);
+        const ss = new SlidingSync(client.baseUrl, lists, roomSubscription, client, opts.timeoutMS ?? 10_000);
         // Grow each list's window to cover EVERY room the server reports for that
         // list, so consumers that want "all rooms" / "all spaces" reliably get
         // them without managing ranges. The spaces list needs this too: on a
@@ -761,6 +765,13 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
         // which correctly re-arms the dirty-marking.
         let currentPos: string | undefined = this.restorePos();
         let failures = 0;
+        // After a response carries to-device events we're probably mid-handshake
+        // (verification / key share), so poll fast for the next few rounds to
+        // keep the multi-step exchange snappy, then relax back to the base
+        // timeout when idle — responsiveness without an idle request storm.
+        let boostPolls = 0;
+        const BOOST_TIMEOUT_MS = 2_000;
+        const BOOST_ROUNDS = 4;
         while (!this.terminated) {
             this.needsResend = false;
             let resp: MSC3575SlidingSyncResponse | undefined;
@@ -769,11 +780,13 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
                 this.lists.forEach((l: SlidingList, key: string) => {
                     reqLists[key] = l.getList(true);
                 });
+                const effectiveTimeout = boostPolls > 0 ? Math.min(BOOST_TIMEOUT_MS, this.timeoutMS) : this.timeoutMS;
+                if (boostPolls > 0) boostPolls -= 1;
                 const reqBody: MSC3575SlidingSyncRequest = {
                     lists: reqLists,
                     pos: currentPos,
-                    timeout: this.timeoutMS,
-                    clientTimeout: this.timeoutMS + BUFFER_PERIOD_MS,
+                    timeout: effectiveTimeout,
+                    clientTimeout: effectiveTimeout + BUFFER_PERIOD_MS,
                     extensions: await this.getExtensionRequest(currentPos === undefined),
                 };
                 // check if we are (un)subscribing to a room and modify request this one time for it
@@ -813,6 +826,11 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
                 resp.lists = resp.lists ?? {};
                 resp.rooms = resp.rooms ?? {};
                 resp.extensions = resp.extensions ?? {};
+                // Mid to-device handshake? Poll fast for the next few rounds.
+                const toDeviceResp = (resp.extensions as { to_device?: { events?: unknown[] } }).to_device;
+                if (Array.isArray(toDeviceResp?.events) && toDeviceResp.events.length > 0) {
+                    boostPolls = BOOST_ROUNDS;
+                }
                 Object.keys(resp.lists).forEach((key: string) => {
                     const list = this.lists.get(key);
                     if (!list || !resp) {
