@@ -149,14 +149,20 @@ describe("SlidingSyncSdk", () => {
 
     // find an extension on a SlidingSyncSdk instance
     const findExtension = (name: string): Extension<any, any> => {
-        expect(mockSlidingSync!.registerExtension).toHaveBeenCalled();
+        // account_data/typing/receipts register on the (mocked) main sync;
+        // to_device/e2ee register on the internal, dedicated encryption sync.
         const mockFn = mockSlidingSync!.registerExtension as jest.Mock;
-        // find the extension
         for (let i = 0; i < mockFn.mock.calls.length; i++) {
             const calledExtension = mockFn.mock.calls[i][0] as Extension<any, any>;
             if (calledExtension?.name() === name) {
                 return calledExtension;
             }
+        }
+        // Not on the main sync — look on the encryption sync's real extension map.
+        const encExtensions = (sdk as unknown as { encryptionSync?: { extensions: Record<string, Extension<any, any>> } })
+            .encryptionSync?.extensions;
+        if (encExtensions?.[name]) {
+            return encExtensions[name];
         }
         fail("cannot find extension " + name);
     };

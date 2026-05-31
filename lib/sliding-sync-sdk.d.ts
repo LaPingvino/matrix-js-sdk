@@ -2,7 +2,7 @@ import { Room } from "./models/room.ts";
 import { type IStoredClientOpts, type MatrixClient } from "./client.ts";
 import { type ISyncStateData, SyncState, type SyncApiOptions, type SetPresence } from "./sync.ts";
 import { type MatrixEvent } from "./models/event.ts";
-import { type SlidingSync } from "./sliding-sync.ts";
+import { SlidingSync } from "./sliding-sync.ts";
 /**
  * A copy of SyncApi such that it can be used as a drop-in replacement for sync v2. For the actual
  * sliding sync API, see sliding-sync.ts or the class SlidingSync.
@@ -16,6 +16,8 @@ export declare class SlidingSyncSdk {
     private syncStateData?;
     private lastPos;
     private failCount;
+    /** Dedicated fast-poll connection for to_device + e2ee (see constructor). */
+    private readonly encryptionSync?;
     private notifEvents;
     constructor(slidingSync: SlidingSync, client: MatrixClient, opts: IStoredClientOpts | undefined, syncOpts: SyncApiOptions);
     private onRoomData;

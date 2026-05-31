@@ -75,6 +75,9 @@ export interface MSC3575SlidingSyncRequest {
     room_subscriptions?: Record<string, MSC3575RoomSubscription>;
     extensions?: object;
     txn_id?: string;
+    /** Distinguishes parallel sliding-sync connections from the same device
+     * (e.g. a dedicated encryption connection alongside the room one). */
+    conn_id?: string;
 
     // query params
     pos?: string;
@@ -392,6 +395,7 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
         private roomSubscriptionInfo: MSC3575RoomSubscription,
         private readonly client: MatrixClient,
         private readonly timeoutMS: number,
+        private readonly connId?: string,
     ) {
         super();
         this.lists = new Map<string, SlidingList>();
@@ -711,7 +715,8 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
     private posStorageKey(): string {
         const userId = this.client.getUserId() ?? "@unknown:unknown";
         const deviceId = this.client.getDeviceId() ?? "nodevice";
-        return `mxjssdk_sss_pos_${userId}_${deviceId}`;
+        const conn = this.connId ?? "main";
+        return `mxjssdk_sss_pos_${userId}_${deviceId}_${conn}`;
     }
 
     private restorePos(): string | undefined {
@@ -788,6 +793,7 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
                     timeout: effectiveTimeout,
                     clientTimeout: effectiveTimeout + BUFFER_PERIOD_MS,
                     extensions: await this.getExtensionRequest(currentPos === undefined),
+                    ...(this.connId ? { conn_id: this.connId } : {}),
                 };
                 // check if we are (un)subscribing to a room and modify request this one time for it
                 const newSubscriptions = difference(this.desiredRoomSubscriptions, this.confirmedRoomSubscriptions);

@@ -45,7 +45,7 @@ import {
     ExtensionState,
     type MSC3575RoomData,
     type MSC3575SlidingSyncResponse,
-    type SlidingSync,
+    SlidingSync,
     SlidingSyncEvent,
     SlidingSyncState,
 } from "./sliding-sync.ts";
@@ -59,6 +59,11 @@ import { KnownMembership, type Membership } from "./@types/membership.ts";
 // to RECONNECTING. This is needed to inform the client of server issues when the
 // keepAlive is successful but the server /sync fails.
 const FAILED_SYNC_ERROR_THRESHOLD = 3;
+
+/** Poll timeout for the dedicated encryption sync. Short so to-device/e2ee
+ * (verification, key shares, device-list updates) are delivered promptly,
+ * independent of the slower room sync. */
+const ENCRYPTION_SYNC_TIMEOUT_MS = 3_000;
 
 type ExtensionE2EERequest = {
     enabled: boolean;
@@ -331,6 +336,8 @@ export class SlidingSyncSdk {
     private syncStateData?: ISyncStateData;
     private lastPos: string | null = null;
     private failCount = 0;
+    /** Dedicated fast-poll connection for to_device + e2ee (see constructor). */
+    private readonly encryptionSync?: SlidingSync;
     private notifEvents: MatrixEvent[] = []; // accumulator of sync events in the current sync response
 
     public constructor(
@@ -348,17 +355,40 @@ export class SlidingSyncSdk {
 
         this.slidingSync.on(SlidingSyncEvent.Lifecycle, this.onLifecycle.bind(this));
         this.slidingSync.on(SlidingSyncEvent.RoomData, this.onRoomData.bind(this));
-        const extensions: Extension<any, any>[] = [
-            new ExtensionToDevice(this.client, this.syncOpts.cryptoCallbacks),
+        // The room/list sync carries the non-latency-critical extensions.
+        const mainExtensions: Extension<any, any>[] = [
             new ExtensionAccountData(this.client),
             new ExtensionTyping(this.client),
             new ExtensionReceipts(this.client),
         ];
-        if (this.syncOpts.cryptoCallbacks) {
-            extensions.push(new ExtensionE2EE(this.syncOpts.cryptoCallbacks));
-        }
-        extensions.forEach((ext) => {
+        mainExtensions.forEach((ext) => {
             this.slidingSync.registerExtension(ext);
+        });
+
+        // Dedicated ENCRYPTION sync: a SECOND connection (its own conn_id) with no
+        // room lists, carrying only the to_device + e2ee extensions, polled fast.
+        // This keeps latency-sensitive crypto — verification handshakes, room-key
+        // shares, device-list updates — off the slow room long-poll, mirroring the
+        // Rust SDK / Element X two-connection design. Without it, to-device sits
+        // behind the room poll and "immediate" things (verification, UTD recovery)
+        // lag by a whole poll cycle each step.
+        this.encryptionSync = new SlidingSync(
+            this.client.baseUrl,
+            new Map(),
+            { timeline_limit: 0, required_state: [] },
+            this.client,
+            ENCRYPTION_SYNC_TIMEOUT_MS,
+            "encryption",
+        );
+        const cryptoExtensions: Extension<any, any>[] = [
+            // to_device is delivered even without crypto (it just won't decrypt).
+            new ExtensionToDevice(this.client, this.syncOpts.cryptoCallbacks),
+        ];
+        if (this.syncOpts.cryptoCallbacks) {
+            cryptoExtensions.push(new ExtensionE2EE(this.syncOpts.cryptoCallbacks));
+        }
+        cryptoExtensions.forEach((ext) => {
+            this.encryptionSync!.registerExtension(ext);
         });
     }
 
@@ -936,7 +966,10 @@ export class SlidingSyncSdk {
             }
         }
 
-        // start syncing
+        // start syncing — the dedicated encryption sync runs in parallel (its
+        // start() is its own long-lived loop, so we don't await it), then the
+        // room sync drives this call.
+        this.encryptionSync?.start().catch((e) => this.syncOpts.logger.error("encryption sliding sync failed", e));
         await this.slidingSync.start();
     }
 
@@ -946,6 +979,7 @@ export class SlidingSyncSdk {
     public stop(): void {
         this.syncOpts.logger.debug("SyncApi.stop");
         this.slidingSync.stop();
+        this.encryptionSync?.stop();
     }
 
     /**

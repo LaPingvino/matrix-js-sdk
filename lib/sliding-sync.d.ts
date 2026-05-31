@@ -44,6 +44,9 @@ export interface MSC3575SlidingSyncRequest {
     room_subscriptions?: Record<string, MSC3575RoomSubscription>;
     extensions?: object;
     txn_id?: string;
+    /** Distinguishes parallel sliding-sync connections from the same device
+     * (e.g. a dedicated encryption connection alongside the room one). */
+    conn_id?: string;
     pos?: string;
     timeout?: number;
     clientTimeout?: number;
@@ -216,6 +219,7 @@ export declare class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, Sli
     private roomSubscriptionInfo;
     private readonly client;
     private readonly timeoutMS;
+    private readonly connId?;
     private lists;
     private listModifiedCount;
     private terminated;
@@ -235,7 +239,7 @@ export declare class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, Sli
      * @param client - The client to use for /sync calls.
      * @param timeoutMS - The number of milliseconds to wait for a response.
      */
-    constructor(proxyBaseUrl: string, lists: Map<string, MSC3575List>, roomSubscriptionInfo: MSC3575RoomSubscription, client: MatrixClient, timeoutMS: number);
+    constructor(proxyBaseUrl: string, lists: Map<string, MSC3575List>, roomSubscriptionInfo: MSC3575RoomSubscription, client: MatrixClient, timeoutMS: number, connId?: string | undefined);
     /**
      * Convenience factory for the common "I want all my rooms" case, sized to
      * scale to very large accounts. Builds two lists — a dedicated `spaces` list
