@@ -453,7 +453,12 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
             timeline_limit: opts.roomSubscriptionTimelineLimit ?? 50,
             required_state: subscriptionRequiredState,
         };
-        const ss = new SlidingSync(client.baseUrl, lists, roomSubscription, client, opts.timeoutMS ?? 10_000);
+        // 3s, not the classic 30s: Continuwuity holds the long-poll for the full
+        // timeout instead of waking on a new event, so the timeout directly bounds
+        // how long a just-received message / sent-echo takes to appear. Short poll
+        // = snappy live updates (at the cost of more request volume) until the
+        // server learns to wake on data. The initial request still uses timeout=0.
+        const ss = new SlidingSync(client.baseUrl, lists, roomSubscription, client, opts.timeoutMS ?? 3_000);
         // Grow each list's window to cover EVERY room the server reports for that
         // list, so consumers that want "all rooms" / "all spaces" reliably get
         // them without managing ranges. The spaces list needs this too: on a

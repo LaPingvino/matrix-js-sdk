@@ -966,6 +966,32 @@ export class SlidingSyncSdk {
             }
         }
 
+        // Seed the GLOBAL account data the room list is categorised by. Sliding
+        // sync (Continuwuity) only resends global account_data that CHANGED since
+        // `pos`, and on a restored pos it resends nothing — and unlike classic
+        // sync we never rehydrate it from the store. So m.direct never arrives on
+        // reload and the DM list comes up empty (likewise ignored users). Classic
+        // sync rebuilds this from getSavedSync(); we have no equivalent, so fetch
+        // the few global types we categorise by straight from the server.
+        // Fire-and-forget: it must NOT block the sync loop (these fetches could
+        // be slow). Each emits ClientEvent.AccountData when it lands, so the DM /
+        // ignored-user lists update the moment the data arrives.
+        void Promise.all(
+            [EventType.Direct, EventType.IgnoredUserList, EventType.PushRules].map(async (type) => {
+                try {
+                    const content = await this.client.getAccountDataFromServer(type as never);
+                    if (!content) return;
+                    const [ev] = mapEvents(this.client, undefined, [{ type, content } as IMinimalEvent]);
+                    if (!ev) return;
+                    const prev = this.client.store.getAccountData(type);
+                    this.client.store.storeAccountDataEvents([ev]);
+                    this.client.emit(ClientEvent.AccountData, ev, prev);
+                } catch {
+                    /* not set / unreachable — non-fatal */
+                }
+            }),
+        );
+
         // start syncing — the dedicated encryption sync runs in parallel (its
         // start() is its own long-lived loop, so we don't await it), then the
         // room sync drives this call.
