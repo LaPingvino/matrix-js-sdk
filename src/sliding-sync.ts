@@ -701,6 +701,39 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
     }
 
     /**
+     * localStorage key under which this account+device's last sliding-sync pos
+     * is cached, so a reload can resume the connection rather than re-initialise.
+     */
+    private posStorageKey(): string {
+        const userId = this.client.getUserId() ?? "@unknown:unknown";
+        const deviceId = this.client.getDeviceId() ?? "nodevice";
+        return `mxjssdk_sss_pos_${userId}_${deviceId}`;
+    }
+
+    private restorePos(): string | undefined {
+        try {
+            if (typeof localStorage === "undefined") return undefined;
+            return localStorage.getItem(this.posStorageKey()) ?? undefined;
+        } catch {
+            return undefined; // private mode / blocked storage — start fresh
+        }
+    }
+
+    private persistPos(pos: string | undefined): void {
+        try {
+            if (typeof localStorage === "undefined") return;
+            const key = this.posStorageKey();
+            if (pos === undefined) {
+                localStorage.removeItem(key);
+            } else {
+                localStorage.setItem(key, pos);
+            }
+        } catch {
+            // Non-fatal: we just fall back to a fresh pos next reload.
+        }
+    }
+
+    /**
      * Re-setup this connection e.g in the event of an expired session.
      */
     private resetup(): void {
@@ -720,7 +753,14 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
     public async start(): Promise<void> {
         this.abortController = new AbortController();
 
-        let currentPos: string | undefined;
+        // Restore the last pos so a page reload resumes the existing connection
+        // instead of starting with pos=undefined — which forces the E2EE
+        // extension to markAllTrackedUsersAsDirty (a full device-list re-query
+        // and a UTD window) on every reload. If the server has expired the
+        // connection the first request 400s and we reset to undefined below,
+        // which correctly re-arms the dirty-marking.
+        let currentPos: string | undefined = this.restorePos();
+        let failures = 0;
         while (!this.terminated) {
             this.needsResend = false;
             let resp: MSC3575SlidingSyncResponse | undefined;
@@ -756,6 +796,8 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
                 this.pendingReq = this.client.slidingSync(reqBody, this.proxyBaseUrl, this.abortController.signal);
                 resp = await this.pendingReq;
                 currentPos = resp.pos;
+                this.persistPos(currentPos);
+                failures = 0; // a successful round-trip clears the backoff
                 // update what we think we're subscribed to.
                 for (const roomId of newSubscriptions) {
                     this.confirmedRoomSubscriptions.add(roomId);
@@ -787,6 +829,7 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
                         // so drop state and re-request
                         this.resetup();
                         currentPos = undefined;
+                        this.persistPos(undefined); // drop the stale pos
                         await sleep(50); // in case the 400 was for something else; don't tightloop
                         continue;
                     } // else fallthrough to generic error handling
@@ -794,7 +837,15 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
                     continue; // don't sleep as we caused this error by abort()ing the request.
                 }
                 logger.error(err);
-                await sleep(5000);
+                // Exponential backoff with jitter instead of a flat 5s. A
+                // transient drop (a suspended long-poll — ERR_NETWORK_IO_SUSPENDED
+                // on tab background/sleep — or a brief network blip) recovers on
+                // the first retry after ~1s rather than always stalling 5s; only
+                // a persistently failing server backs off further. Capped at 30s.
+                failures += 1;
+                const backoffMs = Math.min(30000, 1000 * 2 ** Math.min(failures - 1, 5));
+                const jitterMs = Math.floor(backoffMs * 0.2 * Math.random());
+                await sleep(backoffMs + jitterMs);
             }
             if (!resp) {
                 continue;

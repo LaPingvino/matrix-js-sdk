@@ -347,6 +347,13 @@ export declare class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, Sli
      */
     stop(): void;
     /**
+     * localStorage key under which this account+device's last sliding-sync pos
+     * is cached, so a reload can resume the connection rather than re-initialise.
+     */
+    private posStorageKey;
+    private restorePos;
+    private persistPos;
+    /**
      * Re-setup this connection e.g in the event of an expired session.
      */
     private resetup;
