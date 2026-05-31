@@ -1188,6 +1188,48 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
     }
 
     /**
+     * Force a full member load from the server (`/members`), bypassing the
+     * `lazyLoadMembers` no-op.
+     *
+     * Under sliding sync the lean `required_state` only delivers `$LAZY`
+     * senders, and when `lazyLoadMembers` is off (the correct setting on the
+     * sliding path) {@link loadMembersIfNeeded} short-circuits — `membersPromise`
+     * is pre-resolved to `false`, so it never fetches. The roster therefore
+     * never completes: bridged-group senders render as raw mxids and @-mention
+     * autocomplete comes up empty. This always hits `/members` and injects the
+     * result as out-of-band members, and caches the in-flight promise as
+     * `membersPromise` so a following {@link loadMembersIfNeeded} reuses it.
+     *
+     * Callers should gate on need (e.g. once on room open, or when the server's
+     * `joined_count` exceeds the members we know) so we don't hammer `/members`.
+     */
+    public forceLoadMembers(): Promise<boolean> {
+        this.currentState.markOutOfBandMembersStarted();
+        const update = this.loadMembersFromServer()
+            .then((rawMembers) => {
+                const memberEvents = rawMembers.filter(noUnsafeEventProps).map(this.client.getEventMapper());
+                this.currentState.setOutOfBandMembers(memberEvents);
+                logger.log(`LL: forceLoadMembers got ${memberEvents.length} members for room ${this.roomId}`);
+                const oobMembers = this.currentState
+                    .getMembers()
+                    .filter((m) => m.isOutOfBand())
+                    .map((m) => m.events.member?.event as IStateEventWithRoomId);
+                this.client.store
+                    .setOutOfBandMembers(this.roomId, oobMembers)
+                    .catch((err) => logger.log("LL: storing OOB room members failed, oh well", err));
+                return true;
+            })
+            .catch((err) => {
+                // allow retries on fail
+                this.membersPromise = undefined;
+                this.currentState.markOutOfBandMembersFailed();
+                throw err;
+            });
+        this.membersPromise = update;
+        return update;
+    }
+
+    /**
      * Removes the lazily loaded members from storage if needed
      */
     public async clearLoadedMembersIfNeeded(): Promise<void> {
