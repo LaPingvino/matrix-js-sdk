@@ -343,9 +343,28 @@ export const DEFAULT_SLIDING_SYNC_REQUIRED_STATE: string[][] = [
 ];
 
 /**
- * Default required_state for the spaces list and opened-room subscriptions:
- * the lean set PLUS the heavier hierarchy/power/widget/emoji state. The spaces
- * list needs `m.space.child`; opened rooms want everything.
+ * Default required_state for the dedicated SPACES list: the lean inbox set plus
+ * the space hierarchy edge (`m.space.child`) needed to build the tree — and
+ * NOTHING heavier.
+ *
+ * This list grows its window to cover EVERY room the server reports for it, and
+ * on a server that ignores the `room_types` filter (Continuwuity) that means
+ * every room you're in. Carrying per-room `m.room.power_levels` / widgets /
+ * emoji-pack state for all of them (as the subscription set below does) made the
+ * spaces load slow and trickle in. A space only needs that heavy state when you
+ * OPEN or manage it — at which point it gets a room subscription (the set below)
+ * which carries it. So the list itself stays lean.
+ */
+export const DEFAULT_SLIDING_SYNC_SPACES_LIST_REQUIRED_STATE: string[][] = [
+    ...DEFAULT_SLIDING_SYNC_REQUIRED_STATE,
+    ["m.space.child", MSC3575_WILDCARD],
+];
+
+/**
+ * Default required_state for opened-room SUBSCRIPTIONS: the lean set PLUS the
+ * heavier hierarchy/power/widget/emoji state an open room wants. (Previously
+ * also used for the spaces list — see {@link DEFAULT_SLIDING_SYNC_SPACES_LIST_REQUIRED_STATE}
+ * for why that was split out.)
  */
 export const DEFAULT_SLIDING_SYNC_SPACES_REQUIRED_STATE: string[][] = [
     ...DEFAULT_SLIDING_SYNC_REQUIRED_STATE,
@@ -426,7 +445,10 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
         // baked-in lean sets (NOT ["*","*"], which Continuwuity ignores); pass
         // requiredState to override.
         const requiredState = opts.requiredState ?? DEFAULT_SLIDING_SYNC_REQUIRED_STATE;
-        const spacesRequiredState = opts.spacesRequiredState ?? DEFAULT_SLIDING_SYNC_SPACES_REQUIRED_STATE;
+        // The spaces LIST stays lean (it grows to cover every room; heavy
+        // per-room state there is what made spaces trickle in slowly). Opened
+        // rooms get the heavy set via their subscription.
+        const spacesRequiredState = opts.spacesRequiredState ?? DEFAULT_SLIDING_SYNC_SPACES_LIST_REQUIRED_STATE;
         const subscriptionRequiredState = opts.subscriptionRequiredState ?? DEFAULT_SLIDING_SYNC_SPACES_REQUIRED_STATE;
         const windowSize = opts.windowSize ?? 100;
         const lists = new Map<string, MSC3575List>([

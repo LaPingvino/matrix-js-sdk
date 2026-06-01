@@ -48,6 +48,7 @@ import {
     SlidingSync,
     SlidingSyncEvent,
     SlidingSyncState,
+    DEFAULT_SLIDING_SYNC_REQUIRED_STATE,
 } from "./sliding-sync.ts";
 import { EventType, UNSTABLE_ELEMENT_FUNCTIONAL_USERS } from "./@types/event.ts";
 import { type IPushRules } from "./@types/PushRules.ts";
@@ -64,6 +65,10 @@ const FAILED_SYNC_ERROR_THRESHOLD = 3;
  * (verification, key shares, device-list updates) are delivered promptly,
  * independent of the slower room sync. */
 const ENCRYPTION_SYNC_TIMEOUT_MS = 3_000;
+
+/** Name of the lean room subscription used to bulk-materialise DM rooms (just
+ * enough state to show them in the list, NOT the heavy opened-room set). */
+const DM_MATERIALIZE_SUB = "lean-materialize";
 
 type ExtensionE2EERequest = {
     enabled: boolean;
@@ -1002,11 +1007,22 @@ export class SlidingSyncSdk {
                             }
                         }
                         if (dmRoomIds.size) {
+                            // Materialise DMs with a LEAN subscription, not the
+                            // default heavy one (timeline_limit 50 + power/widget/
+                            // emoji state). We only need a DM to APPEAR with a name
+                            // — hauling 50 messages + heavy state for every DM on
+                            // startup is real load weight. Opening a DM upgrades it
+                            // (the consumer's on-open backfill fills the timeline).
+                            this.slidingSync.addCustomSubscription(DM_MATERIALIZE_SUB, {
+                                timeline_limit: 1,
+                                required_state: DEFAULT_SLIDING_SYNC_REQUIRED_STATE,
+                            });
                             const subs = this.slidingSync.getRoomSubscriptions();
                             let added = false;
                             for (const id of dmRoomIds) {
                                 if (!subs.has(id)) {
                                     subs.add(id);
+                                    this.slidingSync.useCustomSubscription(id, DM_MATERIALIZE_SUB);
                                     added = true;
                                 }
                             }
