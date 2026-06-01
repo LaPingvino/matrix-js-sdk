@@ -798,12 +798,20 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
         let currentPos: string | undefined = this.restorePos();
         let failures = 0;
         // After a response carries to-device events we're probably mid-handshake
-        // (verification / key share), so poll fast for the next few rounds to
-        // keep the multi-step exchange snappy, then relax back to the base
-        // timeout when idle — responsiveness without an idle request storm.
+        // (verification / key share), so poll FAST for the next several rounds to
+        // keep the multi-step exchange snappy, then relax back to the base timeout
+        // when idle — responsiveness without an idle request storm.
+        //
+        // Continuwuity holds each long-poll for the full timeout (it doesn't wake on
+        // new data), so the per-step latency of a SAS handshake is bounded by this
+        // value. A full emoji verification is ~6-7 to-device round trips (ready /
+        // start / accept / key×2 / mac×2), so a 2s boost over only 4 rounds left it
+        // feeling slow. 350ms over 12 rounds covers the whole handshake and cuts each
+        // step ~6x. Only the dedicated encryption sync carries the to_device
+        // extension, so this fast polling never touches the room/list sync.
         let boostPolls = 0;
-        const BOOST_TIMEOUT_MS = 2_000;
-        const BOOST_ROUNDS = 4;
+        const BOOST_TIMEOUT_MS = 350;
+        const BOOST_ROUNDS = 12;
         while (!this.terminated) {
             this.needsResend = false;
             let resp: MSC3575SlidingSyncResponse | undefined;
