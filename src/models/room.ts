@@ -973,16 +973,6 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
     public getAvatarFallbackMember(): RoomMember | undefined {
         const functionalMembers = this.getFunctionalMembers();
 
-        // Prefer the canonical m.direct partner when this is a DM: heroes can be
-        // empty/degenerate under sliding sync, so trust m.direct for identity and
-        // only fall through to the heroes/member heuristics below when we don't
-        // yet hold that member (then their profile fills in from heroes).
-        const directUserId = this.getDirectUserId();
-        if (directUserId) {
-            const directMember = this.getMember(directUserId);
-            if (directMember) return directMember;
-        }
-
         // Only generate a fallback avatar if the conversation is with a single specific other user (a "DM").
         let nonFunctionalMemberCount = 0;
         this.getMembers()!.forEach((m) => {
@@ -1065,6 +1055,18 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
                 member.user = availableUser;
                 return member;
             }
+        }
+
+        // Last resort: the heroes/member heuristics above all failed (heroes can be
+        // empty/degenerate under sliding sync), so trust m.direct for the DM partner's
+        // identity. This MUST stay below the heroes path so the avatar tracks the same
+        // person as the displayed name (calculateRoomName is heroes-first and never
+        // consults m.direct) — preferring m.direct here made the avatar flip to a stale
+        // partner while the name stayed correct.
+        const directUserId = this.getDirectUserId();
+        if (directUserId) {
+            const directMember = this.getMember(directUserId);
+            if (directMember) return directMember;
         }
     }
 

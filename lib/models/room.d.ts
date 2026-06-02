@@ -512,6 +512,23 @@ export declare class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandle
      */
     loadMembersIfNeeded(): Promise<boolean>;
     /**
+     * Force a full member load from the server (`/members`), bypassing the
+     * `lazyLoadMembers` no-op.
+     *
+     * Under sliding sync the lean `required_state` only delivers `$LAZY`
+     * senders, and when `lazyLoadMembers` is off (the correct setting on the
+     * sliding path) {@link loadMembersIfNeeded} short-circuits — `membersPromise`
+     * is pre-resolved to `false`, so it never fetches. The roster therefore
+     * never completes: bridged-group senders render as raw mxids and @-mention
+     * autocomplete comes up empty. This always hits `/members` and injects the
+     * result as out-of-band members, and caches the in-flight promise as
+     * `membersPromise` so a following {@link loadMembersIfNeeded} reuses it.
+     *
+     * Callers should gate on need (e.g. once on room open, or when the server's
+     * `joined_count` exceeds the members we know) so we don't hammer `/members`.
+     */
+    forceLoadMembers(): Promise<boolean>;
+    /**
      * Removes the lazily loaded members from storage if needed
      */
     clearLoadedMembersIfNeeded(): Promise<void>;
