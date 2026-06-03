@@ -68,6 +68,7 @@ import {
     type StartDehydrationOpts,
     UserVerificationStatus,
     type VerificationRequest,
+    VerificationPhase,
 } from "../crypto-api/index.ts";
 import { deviceKeysToDeviceMap, rustDeviceToJsDevice } from "./device-converter.ts";
 import { type IDownloadKeyResult, type IQueryKeysRequest } from "../client.ts";
@@ -1041,6 +1042,40 @@ export class RustCrypto extends TypedEventEmitter<RustCryptoEvents, CryptoEventH
     }
 
     /**
+     * Tear down any *other* in-flight to-device self-verification flows lingering in the
+     * OlmMachine, keeping only `keepTransactionId` if given.
+     *
+     * Abandoned flows — from a previous attempt, a page reload, or a dialog closed
+     * mid-handshake — otherwise sit in the crypto core until the 10-minute reaper. The
+     * rust SAS state machine self-cancels with `m.timeout` once an event arrives more than
+     * 60s after the previous one (`MAX_EVENT_TIMEOUT`) or the flow is older than 5 min
+     * (`MAX_AGE`), so a late event routed to a stale flow is exactly what aborts a fresh,
+     * otherwise-matching verification with `m.timeout`. Cancelling them up front gives every
+     * new self-verification a clean slate. This lives in the SDK (rather than each client's
+     * UI) so all consumers inherit the hygiene.
+     *
+     * Cancels SEQUENTIALLY on purpose: each `cancel()` drives the single, non-reentrant
+     * OlmMachine, so firing them concurrently is the same wasm-reentrancy hazard that
+     * produced the spurious `m.mismatched_sas` under sliding sync.
+     */
+    private async cancelStaleToDeviceVerifications(keepTransactionId?: string): Promise<void> {
+        const requests = this.getVerificationRequestsToDeviceInProgress(this.userId);
+        for (const request of requests) {
+            if (
+                request.transactionId !== keepTransactionId &&
+                request.phase !== VerificationPhase.Done &&
+                request.phase !== VerificationPhase.Cancelled
+            ) {
+                try {
+                    await request.cancel();
+                } catch (e) {
+                    this.logger.warn(`Failed to cancel stale verification request ${request.transactionId}`, e);
+                }
+            }
+        }
+    }
+
+    /**
      * Finds a DM verification request that is already in progress for the given room id
      *
      * Implementation of {@link CryptoApi#findVerificationRequestDMInProgress}
@@ -1158,6 +1193,9 @@ export class RustCrypto extends TypedEventEmitter<RustCryptoEvents, CryptoEventH
             throw new Error("cannot request verification for this device when there is no existing cross-signing key");
         }
 
+        // Clean slate: never let a stale/abandoned flow coexist with the fresh one.
+        await this.cancelStaleToDeviceVerifications();
+
         try {
             const [request, outgoingRequest]: [RustSdkCryptoJs.VerificationRequest, RustSdkCryptoJs.ToDeviceRequest] =
                 await userIdentity.requestVerification(
@@ -1191,6 +1229,9 @@ export class RustCrypto extends TypedEventEmitter<RustCryptoEvents, CryptoEventH
         if (!device) {
             throw new Error("Not a known device");
         }
+
+        // Clean slate: never let a stale/abandoned flow coexist with the fresh one.
+        await this.cancelStaleToDeviceVerifications();
 
         try {
             const [request, outgoingRequest] = device.requestVerification(
@@ -1785,6 +1826,13 @@ export class RustCrypto extends TypedEventEmitter<RustCryptoEvents, CryptoEventH
         );
 
         if (request) {
+            // Clean slate: tear down any *other* in-flight self-verification flows (zombies
+            // from earlier attempts/reloads) so a late event can't be routed to a stale one
+            // and abort this fresh request with m.timeout. Keep the one we just received.
+            // Fire-and-forget — it cancels sequentially and must not delay surfacing the request.
+            void this.cancelStaleToDeviceVerifications(transactionId).catch((e) =>
+                this.logger.warn("Failed to sweep stale verifications on incoming request", e),
+            );
             this.emit(CryptoEvent.VerificationRequestReceived, this.makeVerificationRequest(request));
         } else {
             // There are multiple reasons this can happen; probably the most likely is that the event is an

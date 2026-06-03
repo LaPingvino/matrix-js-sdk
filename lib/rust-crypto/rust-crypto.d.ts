@@ -243,6 +243,24 @@ export declare class RustCrypto extends TypedEventEmitter<RustCryptoEvents, Cryp
      */
     getVerificationRequestsToDeviceInProgress(userId: string): VerificationRequest[];
     /**
+     * Tear down any *other* in-flight to-device self-verification flows lingering in the
+     * OlmMachine, keeping only `keepTransactionId` if given.
+     *
+     * Abandoned flows — from a previous attempt, a page reload, or a dialog closed
+     * mid-handshake — otherwise sit in the crypto core until the 10-minute reaper. The
+     * rust SAS state machine self-cancels with `m.timeout` once an event arrives more than
+     * 60s after the previous one (`MAX_EVENT_TIMEOUT`) or the flow is older than 5 min
+     * (`MAX_AGE`), so a late event routed to a stale flow is exactly what aborts a fresh,
+     * otherwise-matching verification with `m.timeout`. Cancelling them up front gives every
+     * new self-verification a clean slate. This lives in the SDK (rather than each client's
+     * UI) so all consumers inherit the hygiene.
+     *
+     * Cancels SEQUENTIALLY on purpose: each `cancel()` drives the single, non-reentrant
+     * OlmMachine, so firing them concurrently is the same wasm-reentrancy hazard that
+     * produced the spurious `m.mismatched_sas` under sliding sync.
+     */
+    private cancelStaleToDeviceVerifications;
+    /**
      * Finds a DM verification request that is already in progress for the given room id
      *
      * Implementation of {@link CryptoApi#findVerificationRequestDMInProgress}
