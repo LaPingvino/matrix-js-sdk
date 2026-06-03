@@ -123,8 +123,13 @@ export interface SyncCryptoCallbacks {
      * Used to complete batch processing, or to initiate background processes
      *
      * @param syncState - information about the completed sync.
+     *
+     * Returns a promise that resolves once any outgoing-request processing kicked off as a
+     * result has completed. Callers on a fast-polling sync MUST await it, so the next sync
+     * cycle's to-device processing does not overlap this cycle's outgoing-request pump on the
+     * single, non-reentrant OlmMachine.
      */
-    onSyncCompleted(syncState: OnSyncCompletedData): void;
+    onSyncCompleted(syncState: OnSyncCompletedData): Promise<void>;
     /**
      * Mark all tracked users' device lists as dirty.
      *

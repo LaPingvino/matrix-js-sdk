@@ -449,7 +449,7 @@ export declare class RustCrypto extends TypedEventEmitter<RustCryptoEvents, Cryp
      *
      * @param syncState - information on the completed sync.
      */
-    onSyncCompleted(syncState: OnSyncCompletedData): void;
+    onSyncCompleted(syncState: OnSyncCompletedData): Promise<void>;
     /**
      * Implementation of {@link CryptoApi#markAllTrackedUsersAsDirty}.
      */

@@ -1756,12 +1756,23 @@ export class RustCrypto extends TypedEventEmitter<RustCryptoEvents, CryptoEventH
      *
      * @param syncState - information on the completed sync.
      */
-    public onSyncCompleted(syncState: OnSyncCompletedData): void {
-        // Processing the /sync may have produced new outgoing requests which need sending, so kick off the outgoing
-        // request loop, if it's not already running.
-        this.outgoingRequestsManager.doProcessOutgoingRequests().catch((e) => {
+    public async onSyncCompleted(syncState: OnSyncCompletedData): Promise<void> {
+        // Processing the /sync may have produced new outgoing requests which need sending, so run the outgoing
+        // request loop.
+        //
+        // AWAIT it (rather than fire-and-forget). The dedicated encryption sync polls fast — and, mid-SAS, every
+        // 350ms via the to-device boost. The pump drives the single, non-reentrant OlmMachine (outgoingRequests()
+        // / markRequestAsSent), and so does the *next* cycle's to-device receive (receiveSyncChanges). If we let
+        // the pump run in the background, that next receive overlaps it on the OlmMachine and corrupts in-flight
+        // state — most visibly an SAS verification whose MAC then fails to verify, surfacing as a spurious
+        // m.mismatched_sas. Draining the pump before returning serialises receive → pump → next-receive within
+        // the encryption sync. (The earlier sequential-extension fix only closed the *within-cycle* race; the
+        // fast poll made the cross-cycle pump/receive overlap the dominant one.)
+        try {
+            await this.outgoingRequestsManager.doProcessOutgoingRequests();
+        } catch (e) {
             this.logger.warn("onSyncCompleted: Error processing outgoing requests", e);
-        });
+        }
     }
 
     /**

@@ -121,7 +121,11 @@ class ExtensionE2EE implements Extension<ExtensionE2EERequest, ExtensionE2EEResp
             data["device_unused_fallback_key_types"] || data["org.matrix.msc2732.device_unused_fallback_key_types"],
         );
 
-        this.crypto.onSyncCompleted({});
+        // AWAIT: drain the outgoing-request pump before this cycle returns, so the next
+        // (fast) encryption-sync poll's to-device receive does not overlap the pump on the
+        // single non-reentrant OlmMachine — which corrupts in-flight SAS (spurious
+        // m.mismatched_sas). See RustCrypto.onSyncCompleted.
+        await this.crypto.onSyncCompleted({});
     }
 }
 
