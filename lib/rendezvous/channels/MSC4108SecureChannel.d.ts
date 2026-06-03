@@ -1,4 +1,4 @@
-import { type Curve25519PublicKey, QrCodeMode } from "@matrix-org/matrix-sdk-crypto-wasm";
+import { type Curve25519PublicKey, QrCodeIntent } from "@matrix-org/matrix-sdk-crypto-wasm";
 import { ClientRendezvousFailureReason, MSC4108FailureReason, type MSC4108Payload, type RendezvousFailureListener } from "../index.ts";
 import { type MSC4108RendezvousSession } from "../transports/MSC4108RendezvousSession.ts";
 /**
@@ -20,8 +20,8 @@ export declare class MSC4108SecureChannel {
      * @param mode the mode to generate the QR code in, either `Login` or `Reciprocate`.
      * @param serverName the name of the homeserver to connect to, as defined by server discovery in the spec, required for `Reciprocate` mode.
      */
-    generateCode(mode: QrCodeMode.Login): Promise<Uint8Array>;
-    generateCode(mode: QrCodeMode.Reciprocate, serverName: string): Promise<Uint8Array>;
+    generateCode(mode: QrCodeIntent.Login): Promise<Uint8Array>;
+    generateCode(mode: QrCodeIntent.Reciprocate, serverName: string): Promise<Uint8Array>;
     /**
      * Returns the check code for the secure channel or undefined if not generated yet.
      */
