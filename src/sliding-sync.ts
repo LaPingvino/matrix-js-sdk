@@ -666,24 +666,28 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
         return ext;
     }
 
+    // Extension onResponse handlers MUST run sequentially, not via Promise.all.
+    // The to_device and e2ee extensions both drive the (single, non-reentrant) rust
+    // crypto OlmMachine: to_device feeds incoming events via receiveSyncChanges, while
+    // e2ee's onSyncCompleted triggers the outgoing-request pump (outgoingRequests()).
+    // Running them concurrently lets those two calls hit the wasm OlmMachine at the same
+    // time, corrupting in-flight state — most visibly an SAS verification that the core
+    // then aborts with a spurious m.mismatched_sas. Sequential iteration follows
+    // registration order (to_device before e2ee = feed-incoming before send-outgoing).
     private async onPreExtensionsResponse(ext: Record<string, object>): Promise<void> {
-        await Promise.all(
-            Object.keys(ext).map(async (extName) => {
-                if (this.extensions[extName].when() == ExtensionState.PreProcess) {
-                    await this.extensions[extName].onResponse(ext[extName]);
-                }
-            }),
-        );
+        for (const extName of Object.keys(ext)) {
+            if (this.extensions[extName].when() == ExtensionState.PreProcess) {
+                await this.extensions[extName].onResponse(ext[extName]);
+            }
+        }
     }
 
     private async onPostExtensionsResponse(ext: Record<string, object>): Promise<void> {
-        await Promise.all(
-            Object.keys(ext).map(async (extName) => {
-                if (this.extensions[extName].when() == ExtensionState.PostProcess) {
-                    await this.extensions[extName].onResponse(ext[extName]);
-                }
-            }),
-        );
+        for (const extName of Object.keys(ext)) {
+            if (this.extensions[extName].when() == ExtensionState.PostProcess) {
+                await this.extensions[extName].onResponse(ext[extName]);
+            }
+        }
     }
 
     /**
