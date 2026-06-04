@@ -18,7 +18,11 @@ export declare class SlidingSyncSdk {
     private failCount;
     /** Dedicated fast-poll connection for to_device + e2ee (see constructor). */
     private readonly encryptionSync?;
+    /** Persistent per-room cache; replayed on boot so the UI paints before the network answers. */
+    private readonly roomCache;
     private notifEvents;
+    /** True while replaying cached rooms on boot, so onRoomData doesn't re-persist them. */
+    private rehydrating;
     constructor(slidingSync: SlidingSync, client: MatrixClient, opts: IStoredClientOpts | undefined, syncOpts: SyncApiOptions);
     private onRoomData;
     private onLifecycle;
@@ -74,6 +78,17 @@ export declare class SlidingSyncSdk {
     injectRoomEvents(room: Room, stateEventList: MatrixEvent[], timelineEventList?: MatrixEvent[], numLive?: number): Promise<void>;
     private resolveInvites;
     retryImmediately(): boolean;
+    /**
+     * Paint from cache before the network answers: replay every persisted room's
+     * data through the SAME ingestion path a live response takes ({@link onRoomData}
+     * → {@link processRoomData}), so the rooms, timelines and state are reconstructed
+     * identically to classic sync's `getSavedSync()` rehydrate — just sourced per-room
+     * from {@link SlidingSyncCache} instead of one monolithic accumulator. Must run
+     * BEFORE the live sync starts, so the live `initial=true` responses dedupe against
+     * the rehydrated timeline rather than duplicating it. Best-effort: any failure
+     * leaves us with today's cold start.
+     */
+    private rehydrateFromCache;
     /**
      * Main entry point. Blocks until stop() is called.
      */

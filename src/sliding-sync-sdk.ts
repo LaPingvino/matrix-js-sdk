@@ -50,6 +50,7 @@ import {
     SlidingSyncState,
     DEFAULT_SLIDING_SYNC_REQUIRED_STATE,
 } from "./sliding-sync.ts";
+import { SlidingSyncCache } from "./sliding-sync-cache.ts";
 import { EventType, UNSTABLE_ELEMENT_FUNCTIONAL_USERS } from "./@types/event.ts";
 import { type IPushRules } from "./@types/PushRules.ts";
 import { RoomStateEvent } from "./models/room-state.ts";
@@ -347,7 +348,11 @@ export class SlidingSyncSdk {
     private failCount = 0;
     /** Dedicated fast-poll connection for to_device + e2ee (see constructor). */
     private readonly encryptionSync?: SlidingSync;
+    /** Persistent per-room cache; replayed on boot so the UI paints before the network answers. */
+    private readonly roomCache: SlidingSyncCache;
     private notifEvents: MatrixEvent[] = []; // accumulator of sync events in the current sync response
+    /** True while replaying cached rooms on boot, so onRoomData doesn't re-persist them. */
+    private rehydrating = false;
 
     public constructor(
         private readonly slidingSync: SlidingSync,
@@ -357,6 +362,7 @@ export class SlidingSyncSdk {
     ) {
         this.opts = defaultClientOpts(opts);
         this.syncOpts = defaultSyncApiOpts(syncOpts);
+        this.roomCache = new SlidingSyncCache(this.client.getUserId() ?? undefined, this.syncOpts.logger);
 
         if (client.getNotifTimelineSet()) {
             client.reEmitter.reEmit(client.getNotifTimelineSet()!, [RoomEvent.Timeline, RoomEvent.TimelineReset]);
@@ -416,6 +422,9 @@ export class SlidingSyncSdk {
                 room = _createAndReEmitRoom(this.client, roomId, this.opts);
             }
             await this.processRoomData(this.client, room!, roomData);
+            // Remember this room's data so the next boot can paint it before the
+            // network answers. Skipped while replaying (the data came FROM cache).
+            if (!this.rehydrating) this.roomCache.put(roomId, roomData);
         } catch (e) {
             // Resilience: one malformed room must not break sliding sync (it
             // arrives per-room here, so an unhandled rejection would otherwise
@@ -953,6 +962,38 @@ export class SlidingSyncSdk {
     }
 
     /**
+     * Paint from cache before the network answers: replay every persisted room's
+     * data through the SAME ingestion path a live response takes ({@link onRoomData}
+     * → {@link processRoomData}), so the rooms, timelines and state are reconstructed
+     * identically to classic sync's `getSavedSync()` rehydrate — just sourced per-room
+     * from {@link SlidingSyncCache} instead of one monolithic accumulator. Must run
+     * BEFORE the live sync starts, so the live `initial=true` responses dedupe against
+     * the rehydrated timeline rather than duplicating it. Best-effort: any failure
+     * leaves us with today's cold start.
+     */
+    private async rehydrateFromCache(): Promise<void> {
+        let rooms: { roomId: string; data: MSC3575RoomData }[];
+        try {
+            rooms = await this.roomCache.loadAll();
+        } catch (e) {
+            this.syncOpts.logger.warn("[sss-cache] rehydrate load failed; cold start", e);
+            return;
+        }
+        if (rooms.length === 0) return;
+        this.syncOpts.logger.debug(`[sss-cache] rehydrating ${rooms.length} rooms from cache`);
+        this.rehydrating = true;
+        try {
+            for (const { roomId, data } of rooms) {
+                await this.onRoomData(roomId, data);
+            }
+        } catch (e) {
+            this.syncOpts.logger.warn("[sss-cache] rehydrate replay failed", e);
+        } finally {
+            this.rehydrating = false;
+        }
+    }
+
+    /**
      * Main entry point. Blocks until stop() is called.
      */
     public async sync(): Promise<void> {
@@ -974,6 +1015,13 @@ export class SlidingSyncSdk {
                 }
             }
         }
+
+        // Paint from the persistent per-room cache BEFORE opening the live sync, so
+        // the UI has rooms/timelines/state immediately (the sliding-sync equivalent
+        // of classic sync's getSavedSync() rehydrate). Live initial=true responses
+        // then dedupe against what we just replayed. Awaited so the room model is
+        // warm before the live merge; best-effort, never fatal.
+        await this.rehydrateFromCache();
 
         // Seed the GLOBAL account data the room list is categorised by. Sliding
         // sync (Continuwuity) only resends global account_data that CHANGED since
@@ -1053,6 +1101,8 @@ export class SlidingSyncSdk {
         this.syncOpts.logger.debug("SyncApi.stop");
         this.slidingSync.stop();
         this.encryptionSync?.stop();
+        // Flush any queued room writes so a quick reload still has the latest cache.
+        void this.roomCache.stop();
     }
 
     /**
