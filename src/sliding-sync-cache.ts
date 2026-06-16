@@ -15,6 +15,7 @@ limitations under the License.
 */
 
 import { type MSC3575RoomData } from "./sliding-sync.ts";
+import { type IMinimalEvent } from "./sync-accumulator.ts";
 import { type Logger } from "./logger.ts";
 
 /**
@@ -45,7 +46,7 @@ import { type Logger } from "./logger.ts";
 
 const DB_VERSION = 1;
 /** Bump when the stored record shape changes incompatibly; mismatch wipes the store. */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const STORE = "rooms";
 const META_STORE = "meta";
 /** Cap timeline events per room. Subscriptions deliver at most 50; this is a safety ceiling. */
@@ -59,6 +60,15 @@ interface CachedRoomRecord {
     roomId: string;
     /** Curated MSC3575RoomData (timeline capped). */
     data: MSC3575RoomData;
+    /**
+     * Our own read receipt (an `m.receipt` ephemeral event) at persist time.
+     * Receipts ride a SEPARATE sliding-sync extension, so they are NOT part of
+     * MSC3575RoomData and would otherwise be lost across reloads — leaving the
+     * rehydrated room with a stale `notification_count` and no read marker, which
+     * paints an OLD unread badge until the live receipts arrive and correct it.
+     * Persisting + replaying our marker makes the cached paint self-consistent.
+     */
+    receipt?: IMinimalEvent;
     /** Sort key for eviction + replay order (recency). */
     bump: number;
     /** Wall-clock of last write, for tie-breaking / diagnostics. */
@@ -122,7 +132,7 @@ export class SlidingSyncCache {
                 resolve(null);
                 return;
             }
-            req.onupgradeneeded = () => {
+            req.onupgradeneeded = (): void => {
                 const db = req.result;
                 if (!db.objectStoreNames.contains(STORE)) {
                     const os = db.createObjectStore(STORE, { keyPath: "roomId" });
@@ -132,12 +142,12 @@ export class SlidingSyncCache {
                     db.createObjectStore(META_STORE);
                 }
             };
-            req.onsuccess = () => resolve(req.result);
-            req.onerror = () => {
+            req.onsuccess = (): void => resolve(req.result);
+            req.onerror = (): void => {
                 this.logger.warn("[sss-cache] open failed; disabling cache", req.error);
                 resolve(null);
             };
-            req.onblocked = () => resolve(null);
+            req.onblocked = (): void => resolve(null);
         });
         return this.dbPromise;
     }
@@ -152,14 +162,14 @@ export class SlidingSyncCache {
      * curated {@link MSC3575RoomData} with `initial`/`limited` forced so the caller
      * can feed it straight through the live ingestion path.
      */
-    public async loadAll(): Promise<{ roomId: string; data: MSC3575RoomData }[]> {
+    public async loadAll(): Promise<{ roomId: string; data: MSC3575RoomData; receipt?: IMinimalEvent }[]> {
         const db = await this.open();
         if (!db) return [];
         try {
             const okSchema = await new Promise<boolean>((resolve) => {
                 const r = this.tx(db, [META_STORE], "readonly").objectStore(META_STORE).get("schema");
-                r.onsuccess = () => resolve((r.result ?? SCHEMA_VERSION) === SCHEMA_VERSION);
-                r.onerror = () => resolve(false);
+                r.onsuccess = (): void => resolve((r.result ?? SCHEMA_VERSION) === SCHEMA_VERSION);
+                r.onerror = (): void => resolve(false);
             });
             if (!okSchema) {
                 this.logger.info("[sss-cache] schema changed; clearing cache");
@@ -171,7 +181,7 @@ export class SlidingSyncCache {
                 const idx = this.tx(db, [STORE], "readonly").objectStore(STORE).index("bump");
                 // Descending by bump → most recently active rooms replay first.
                 const cursorReq = idx.openCursor(null, "prev");
-                cursorReq.onsuccess = () => {
+                cursorReq.onsuccess = (): void => {
                     const cur = cursorReq.result;
                     if (!cur) {
                         resolve(out);
@@ -180,11 +190,11 @@ export class SlidingSyncCache {
                     out.push(cur.value as CachedRoomRecord);
                     cur.continue();
                 };
-                cursorReq.onerror = () => resolve(out);
+                cursorReq.onerror = (): void => resolve(out);
             });
             return records
                 .filter((r) => r && r.schema === SCHEMA_VERSION && r.data && r.roomId)
-                .map((r) => ({ roomId: r.roomId, data: { ...r.data, initial: true, limited: true } }));
+                .map((r) => ({ roomId: r.roomId, data: { ...r.data, initial: true, limited: true }, receipt: r.receipt }));
         } catch (e) {
             this.logger.warn("[sss-cache] loadAll failed", e);
             return [];
@@ -192,12 +202,13 @@ export class SlidingSyncCache {
     }
 
     /** Queue a room's data for persistence (debounced + coalesced). */
-    public put(roomId: string, data: MSC3575RoomData): void {
+    public put(roomId: string, data: MSC3575RoomData, receipt?: IMinimalEvent): void {
         if (this.closed || !this.idb || cacheDisabled()) return;
         try {
             this.pending.set(roomId, {
                 roomId,
                 data: curate(data),
+                receipt,
                 bump: data.bump_stamp ?? Date.now(),
                 ts: Date.now(),
                 schema: SCHEMA_VERSION,
@@ -227,9 +238,9 @@ export class SlidingSyncCache {
                 const os = t.objectStore(STORE);
                 for (const rec of batch) os.put(rec);
                 t.objectStore(META_STORE).put(SCHEMA_VERSION, "schema");
-                t.oncomplete = () => resolve();
-                t.onerror = () => resolve();
-                t.onabort = () => resolve();
+                t.oncomplete = (): void => resolve();
+                t.onerror = (): void => resolve();
+                t.onabort = (): void => resolve();
             });
             await this.evict(db);
         } catch (e) {
@@ -241,8 +252,8 @@ export class SlidingSyncCache {
         try {
             const count = await new Promise<number>((resolve) => {
                 const r = this.tx(db, [STORE], "readonly").objectStore(STORE).count();
-                r.onsuccess = () => resolve(r.result);
-                r.onerror = () => resolve(0);
+                r.onsuccess = (): void => resolve(r.result);
+                r.onerror = (): void => resolve(0);
             });
             if (count <= MAX_ROOMS) return;
             const toDrop = count - MAX_ROOMS;
@@ -251,7 +262,7 @@ export class SlidingSyncCache {
                 // Ascending by bump → drop the least recently active first.
                 const cursorReq = t.objectStore(STORE).index("bump").openCursor(null, "next");
                 let dropped = 0;
-                cursorReq.onsuccess = () => {
+                cursorReq.onsuccess = (): void => {
                     const cur = cursorReq.result;
                     if (!cur || dropped >= toDrop) {
                         resolve();
@@ -261,8 +272,8 @@ export class SlidingSyncCache {
                     dropped++;
                     cur.continue();
                 };
-                cursorReq.onerror = () => resolve();
-                t.onabort = () => resolve();
+                cursorReq.onerror = (): void => resolve();
+                t.onabort = (): void => resolve();
             });
         } catch (e) {
             this.logger.warn("[sss-cache] evict failed", e);
@@ -278,9 +289,9 @@ export class SlidingSyncCache {
                 const t = this.tx(db, [STORE, META_STORE], "readwrite");
                 t.objectStore(STORE).clear();
                 t.objectStore(META_STORE).put(SCHEMA_VERSION, "schema");
-                t.oncomplete = () => resolve();
-                t.onerror = () => resolve();
-                t.onabort = () => resolve();
+                t.oncomplete = (): void => resolve();
+                t.onerror = (): void => resolve();
+                t.onabort = (): void => resolve();
             } catch {
                 resolve();
             }

@@ -1,4 +1,5 @@
 import { type MSC3575RoomData } from "./sliding-sync.ts";
+import { type IMinimalEvent } from "./sync-accumulator.ts";
 import { type Logger } from "./logger.ts";
 export declare class SlidingSyncCache {
     private readonly logger;
@@ -20,9 +21,10 @@ export declare class SlidingSyncCache {
     loadAll(): Promise<{
         roomId: string;
         data: MSC3575RoomData;
+        receipt?: IMinimalEvent;
     }[]>;
     /** Queue a room's data for persistence (debounced + coalesced). */
-    put(roomId: string, data: MSC3575RoomData): void;
+    put(roomId: string, data: MSC3575RoomData, receipt?: IMinimalEvent): void;
     /** Write all pending records, then evict down to MAX_ROOMS by lowest bump. */
     flush(): Promise<void>;
     private evict;

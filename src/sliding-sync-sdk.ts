@@ -424,7 +424,30 @@ export class SlidingSyncSdk {
             await this.processRoomData(this.client, room!, roomData);
             // Remember this room's data so the next boot can paint it before the
             // network answers. Skipped while replaying (the data came FROM cache).
-            if (!this.rehydrating) this.roomCache.put(roomId, roomData);
+            // We also snapshot OUR read receipt: it travels on a separate extension
+            // (not in roomData), so without persisting it the rehydrated room has a
+            // stale notification_count and no read marker — the stale-unread flicker.
+            if (!this.rehydrating) {
+                let receipt: IMinimalEvent | undefined;
+                const uid = this.client.getUserId();
+                // Source the marker from getEventReadUpTo — the SAME accessor the
+                // unread UI uses. It returns the LATEST read position across public,
+                // PRIVATE and synthetic receipts. getReadReceiptForUserId alone only
+                // sees the public m.read type, so a user whose latest receipt is a
+                // private one would get a STALE marker persisted — silently bringing
+                // the flicker back for exactly those users. We replay it as a plain
+                // unthreaded public receipt: type doesn't matter for unread, only that
+                // it lands on the same (latest) event so the reloaded count matches.
+                const readUpToId = uid ? room!.getEventReadUpTo(uid, false) : null;
+                if (uid && readUpToId) {
+                    const ts = room!.findEventById(readUpToId)?.getTs() ?? 0;
+                    receipt = {
+                        type: "m.receipt",
+                        content: { [readUpToId]: { "m.read": { [uid]: { ts } } } },
+                    } as IMinimalEvent;
+                }
+                this.roomCache.put(roomId, roomData, receipt);
+            }
         } catch (e) {
             // Resilience: one malformed room must not break sliding sync (it
             // arrives per-room here, so an unhandled rejection would otherwise
@@ -972,7 +995,7 @@ export class SlidingSyncSdk {
      * leaves us with today's cold start.
      */
     private async rehydrateFromCache(): Promise<void> {
-        let rooms: { roomId: string; data: MSC3575RoomData }[];
+        let rooms: { roomId: string; data: MSC3575RoomData; receipt?: IMinimalEvent }[];
         try {
             rooms = await this.roomCache.loadAll();
         } catch (e) {
@@ -983,8 +1006,18 @@ export class SlidingSyncSdk {
         this.syncOpts.logger.debug(`[sss-cache] rehydrating ${rooms.length} rooms from cache`);
         this.rehydrating = true;
         try {
-            for (const { roomId, data } of rooms) {
+            for (const { roomId, data, receipt } of rooms) {
                 await this.onRoomData(roomId, data);
+                // Replay our persisted read receipt AFTER the timeline exists, so the
+                // read marker lands on an event we have and the unread count is right
+                // on first paint instead of flickering from a stale cached count.
+                if (receipt) {
+                    try {
+                        processEphemeralEvents(this.client, roomId, [receipt]);
+                    } catch (e) {
+                        this.syncOpts.logger.debug("[sss-cache] receipt replay failed", e);
+                    }
+                }
             }
         } catch (e) {
             this.syncOpts.logger.warn("[sss-cache] rehydrate replay failed", e);

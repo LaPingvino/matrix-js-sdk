@@ -1109,4 +1109,129 @@ describe("SlidingSyncSdk", () => {
             // we expect it not to crash
         });
     });
+
+    // Regression guard for the "stale unread badge flickers then corrects" bug.
+    // Read receipts ride a SEPARATE sliding-sync extension, so they are NOT part of
+    // the per-room MSC3575RoomData the cache persists. Before the fix, a reload
+    // rehydrated the timeline + (stale) notification_count but NO read marker, so the
+    // UI painted an old unread count until the live receipts extension arrived and
+    // corrected it. The fix persists our own read receipt alongside the room data and
+    // replays it on rehydrate, so the read marker — and therefore the unread count —
+    // is correct on first paint.
+    describe("read-receipt cache persistence (unread flicker regression)", () => {
+        let receiptsExt: Extension<any, any>;
+        const roomId = "!flicker:localhost";
+        // selfUserId is "@alice:localhost", so the OTHER user must be someone else.
+        // The "last read" event is from ANOTHER user — that's the real flicker
+        // scenario (unread = others' messages). Own messages get a SYNthesized read
+        // receipt for free, which would mask whether the REAL marker was restored, so
+        // we assert with ignoreSynthesized=true throughout.
+        const otherUser = "@bob:localhost";
+        let otherEventCounter = 0;
+        const mkOtherEvent = (body: string): IRoomEvent => {
+            otherEventCounter++;
+            return {
+                type: EventType.RoomMessage,
+                content: { body, msgtype: "m.text" },
+                sender: otherUser,
+                origin_server_ts: Date.now(),
+                event_id: "$bob-flicker-" + otherEventCounter,
+            };
+        };
+        const baseTimeline = (last: IRoomEvent): object[] => [
+            mkOwnStateEvent(EventType.RoomCreate, {}, ""),
+            mkOwnStateEvent(EventType.RoomMember, { membership: KnownMembership.Join }, selfUserId),
+            mkOwnStateEvent(EventType.RoomMember, { membership: KnownMembership.Join }, otherUser),
+            last,
+        ];
+        const mkRoomData = (timeline: object[]): MSC3575RoomData =>
+            ({
+                name: "Flicker Room",
+                required_state: [],
+                timeline,
+                initial: true,
+            }) as MSC3575RoomData;
+
+        beforeAll(async () => {
+            await setupClient();
+            const hasSynced = sdk!.sync();
+            await httpBackend!.flushAllExpected();
+            await hasSynced;
+            receiptsExt = findExtension("receipts");
+        });
+        afterAll(teardownClient);
+
+        it("persists our own read receipt with the cached room data", async () => {
+            const lastEvent = mkOtherEvent("hello");
+            const putSpy = jest.spyOn((sdk as unknown as { roomCache: { put: jest.Mock } }).roomCache, "put");
+
+            mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomId, mkRoomData(baseTimeline(lastEvent)));
+            await emitPromise(client!, ClientEvent.Room);
+
+            // We read the room — our read receipt arrives on the receipts extension,
+            // advancing our marker to the other user's latest message.
+            receiptsExt.onResponse({
+                rooms: {
+                    [roomId]: {
+                        type: EventType.Receipt,
+                        content: { [lastEvent.event_id]: { "m.read": { [selfUserId]: { ts: 5000 } } } },
+                    },
+                },
+            });
+
+            // The next room update must snapshot that receipt into the cache (3rd arg),
+            // pointing at the message we read — otherwise it's lost across reloads.
+            putSpy.mockClear();
+            mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomId, mkRoomData([lastEvent]));
+            // put() runs in a microtask AFTER processRoomData resolves — let it land.
+            await new Promise((r) => setTimeout(r, 0));
+
+            const lastCall = putSpy.mock.calls[putSpy.mock.calls.length - 1];
+            expect(lastCall[0]).toEqual(roomId);
+            const persistedReceipt = lastCall[2] as { type: string; content: Record<string, unknown> } | undefined;
+            expect(persistedReceipt?.type).toEqual(EventType.Receipt);
+            expect(persistedReceipt?.content[lastEvent.event_id]).toBeTruthy();
+            expect((persistedReceipt?.content[lastEvent.event_id] as any)["m.read"][selfUserId]).toBeTruthy();
+            putSpy.mockRestore();
+        });
+
+        it("replays the persisted receipt on rehydrate so the read marker is restored", async () => {
+            const rehydrateRoomId = "!rehydrate:localhost";
+            const ev = mkOtherEvent("read me");
+            const data = mkRoomData(baseTimeline(ev));
+            const receipt = {
+                type: EventType.Receipt,
+                content: { [ev.event_id]: { "m.read": { [selfUserId]: { ts: 9000 } } } },
+            };
+
+            // Simulate the persisted cache: room data + our read receipt.
+            (sdk as unknown as { roomCache: { loadAll: jest.Mock } }).roomCache.loadAll = jest
+                .fn()
+                .mockResolvedValue([{ roomId: rehydrateRoomId, data, receipt }]);
+
+            await (sdk as unknown as { rehydrateFromCache: () => Promise<void> }).rehydrateFromCache();
+
+            const room = client!.getRoom(rehydrateRoomId);
+            expect(room).toBeTruthy();
+            // The REAL marker is restored from cache: unread is correct on first paint.
+            expect(room!.getEventReadUpTo(selfUserId, true)).toEqual(ev.event_id);
+        });
+
+        it("regression: WITHOUT a persisted receipt, rehydrate leaves no read marker", async () => {
+            const noReceiptRoomId = "!noreceipt:localhost";
+            const ev = mkOtherEvent("unmarked");
+            const data = mkRoomData(baseTimeline(ev));
+
+            // Old cache shape: room data only, no receipt — the flicker's root cause.
+            (sdk as unknown as { roomCache: { loadAll: jest.Mock } }).roomCache.loadAll = jest
+                .fn()
+                .mockResolvedValue([{ roomId: noReceiptRoomId, data }]);
+
+            await (sdk as unknown as { rehydrateFromCache: () => Promise<void> }).rehydrateFromCache();
+
+            const room = client!.getRoom(noReceiptRoomId);
+            expect(room).toBeTruthy();
+            expect(room!.getEventReadUpTo(selfUserId, true)).toBeNull();
+        });
+    });
 });
