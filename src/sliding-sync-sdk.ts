@@ -353,6 +353,14 @@ export class SlidingSyncSdk {
     private notifEvents: MatrixEvent[] = []; // accumulator of sync events in the current sync response
     /** True while replaying cached rooms on boot, so onRoomData doesn't re-persist them. */
     private rehydrating = false;
+    /**
+     * Rooms that have received a genuine LIVE sliding-sync response this session (NOT a
+     * cache rehydrate). Monotonic — a room never leaves once it's in. Consumers use this
+     * to decide whether a room's data (e.g. its unread count) is trustworthy-current vs a
+     * possibly-stale cached value: sliding sync loads rooms partially/incrementally, so a
+     * rehydrated-but-not-yet-live room's count must be treated as provisional.
+     */
+    private readonly liveSyncedRooms = new Set<string>();
 
     public constructor(
         private readonly slidingSync: SlidingSync,
@@ -424,10 +432,13 @@ export class SlidingSyncSdk {
             await this.processRoomData(this.client, room!, roomData);
             // Remember this room's data so the next boot can paint it before the
             // network answers. Skipped while replaying (the data came FROM cache).
-            // We also snapshot OUR read receipt: it travels on a separate extension
-            // (not in roomData), so without persisting it the rehydrated room has a
-            // stale notification_count and no read marker — the stale-unread flicker.
+            // The read-receipt snapshot below is now a SECONDARY nicety (it gives the
+            // open room a correct marker on first paint); the primary stale-unread fix
+            // is consumer-side confidence gating off `liveSyncedRooms` (see
+            // hasLiveSynced / MatrixClient.isRoomLiveSynced).
             if (!this.rehydrating) {
+                // This room now has verifiably-current data this session.
+                this.liveSyncedRooms.add(roomId);
                 let receipt: IMinimalEvent | undefined;
                 const uid = this.client.getUserId();
                 // Source the marker from getEventReadUpTo — the SAME accessor the
@@ -582,6 +593,7 @@ export class SlidingSyncSdk {
             RoomEvent.MyMembership,
             RoomEvent.Timeline,
             RoomEvent.TimelineReset,
+            RoomEvent.UnreadNotifications,
         ]);
         this.registerStateListeners(room);
         return room;
@@ -982,6 +994,15 @@ export class SlidingSyncSdk {
 
     public retryImmediately(): boolean {
         return true;
+    }
+
+    /**
+     * Whether the given room has received a genuine LIVE sliding-sync response this session
+     * (as opposed to only being painted from the boot cache). Consumers use this to gate
+     * trust in a room's current data — see {@link liveSyncedRooms}.
+     */
+    public hasLiveSynced(roomId: string): boolean {
+        return this.liveSyncedRooms.has(roomId);
     }
 
     /**

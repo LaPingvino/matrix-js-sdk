@@ -1153,7 +1153,8 @@ type RoomEvents =
     | RoomEvent.AccountData
     | RoomEvent.MyMembership
     | RoomEvent.Timeline
-    | RoomEvent.TimelineReset;
+    | RoomEvent.TimelineReset
+    | RoomEvent.UnreadNotifications;
 
 type RoomStateEvents =
     | RoomStateEvent.Events
@@ -1865,6 +1866,23 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      */
     public getSyncState(): SyncState | null {
         return this.syncApi?.getSyncState() ?? null;
+    }
+
+    /**
+     * Whether the given room's data is verifiably current this session.
+     *
+     * Under sliding sync, rooms are loaded partially and incrementally and the boot cache
+     * paints rooms before the network answers — so a room's cached unread count may be stale
+     * until a genuine live response arrives. This returns `true` once the room has received
+     * such a live response (or always, under classic `/sync`, where every joined room is
+     * live). Consumers (e.g. unread badges) use it to avoid presenting a provisional count as
+     * if it were confirmed.
+     */
+    public isRoomLiveSynced(roomId: string): boolean {
+        const api = this.syncApi as { hasLiveSynced?: (roomId: string) => boolean } | undefined;
+        // Only the sliding-sync sync api tracks this; classic /sync has no notion of a
+        // partially-loaded room, so treat every room as live there.
+        return api?.hasLiveSynced ? api.hasLiveSynced(roomId) : true;
     }
 
     /**

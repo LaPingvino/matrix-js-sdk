@@ -822,7 +822,7 @@ export declare enum ClientEvent {
     TurnServers = "turnServers",
     TurnServersError = "turnServers.error"
 }
-type RoomEvents = RoomEvent.Name | RoomEvent.Redaction | RoomEvent.RedactionCancelled | RoomEvent.Receipt | RoomEvent.Tags | RoomEvent.LocalEchoUpdated | RoomEvent.HistoryImportedWithinTimeline | RoomEvent.AccountData | RoomEvent.MyMembership | RoomEvent.Timeline | RoomEvent.TimelineReset;
+type RoomEvents = RoomEvent.Name | RoomEvent.Redaction | RoomEvent.RedactionCancelled | RoomEvent.Receipt | RoomEvent.Tags | RoomEvent.LocalEchoUpdated | RoomEvent.HistoryImportedWithinTimeline | RoomEvent.AccountData | RoomEvent.MyMembership | RoomEvent.Timeline | RoomEvent.TimelineReset | RoomEvent.UnreadNotifications;
 type RoomStateEvents = RoomStateEvent.Events | RoomStateEvent.Members | RoomStateEvent.NewMember | RoomStateEvent.Update | RoomStateEvent.Marker;
 type CryptoEvents = (typeof CryptoEvent)[keyof typeof CryptoEvent];
 type MatrixEventEvents = MatrixEventEvent.Decrypted | MatrixEventEvent.Replaced | MatrixEventEvent.VisibilityChange;
@@ -1065,6 +1065,17 @@ export declare class MatrixClient extends TypedEventEmitter<EmittedEvents, Clien
      * @see MatrixClient#event:"sync"
      */
     getSyncState(): SyncState | null;
+    /**
+     * Whether the given room's data is verifiably current this session.
+     *
+     * Under sliding sync, rooms are loaded partially and incrementally and the boot cache
+     * paints rooms before the network answers — so a room's cached unread count may be stale
+     * until a genuine live response arrives. This returns `true` once the room has received
+     * such a live response (or always, under classic `/sync`, where every joined room is
+     * live). Consumers (e.g. unread badges) use it to avoid presenting a provisional count as
+     * if it were confirmed.
+     */
+    isRoomLiveSynced(roomId: string): boolean;
     /**
      * Returns the additional data object associated with
      * the current sync state, or null if there is no

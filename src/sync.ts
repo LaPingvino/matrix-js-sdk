@@ -1923,6 +1923,7 @@ export function _createAndReEmitRoom(client: MatrixClient, roomId: string, opts:
         RoomEvent.MyMembership,
         RoomEvent.Timeline,
         RoomEvent.TimelineReset,
+        RoomEvent.UnreadNotifications,
         RoomStateEvent.Events,
         RoomStateEvent.Members,
         RoomStateEvent.NewMember,

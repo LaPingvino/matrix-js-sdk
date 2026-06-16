@@ -1234,4 +1234,58 @@ describe("SlidingSyncSdk", () => {
             expect(room!.getEventReadUpTo(selfUserId, true)).toBeNull();
         });
     });
+
+    // The "verifiably loaded this session" signal that drives confidence-gated unread badges:
+    // a room is live-synced once it gets a genuine live response (not a cache rehydrate).
+    describe("isRoomLiveSynced (unread confidence signal)", () => {
+        beforeAll(async () => {
+            await setupClient();
+            const hasSynced = sdk!.sync();
+            await httpBackend!.flushAllExpected();
+            await hasSynced;
+        });
+        afterAll(teardownClient);
+
+        it("is false for an unseen room and true after a live response", async () => {
+            const roomId = "!livesynced:localhost";
+            expect(sdk!.hasLiveSynced(roomId)).toBe(false);
+
+            mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomId, {
+                name: "Live",
+                required_state: [],
+                timeline: [
+                    mkOwnStateEvent(EventType.RoomCreate, {}, ""),
+                    mkOwnStateEvent(EventType.RoomMember, { membership: KnownMembership.Join }, selfUserId),
+                    mkOwnEvent(EventType.RoomMessage, { body: "hi" }),
+                ],
+                initial: true,
+            });
+            await emitPromise(client!, ClientEvent.Room);
+            await new Promise((r) => setTimeout(r, 0));
+
+            expect(sdk!.hasLiveSynced(roomId)).toBe(true);
+        });
+
+        it("is NOT set by a cache rehydrate (rehydrating=true)", async () => {
+            const roomId = "!rehydrate-not-live:localhost";
+            (sdk as unknown as { roomCache: { loadAll: jest.Mock } }).roomCache.loadAll = jest
+                .fn()
+                .mockResolvedValue([
+                    {
+                        roomId,
+                        data: {
+                            name: "Cached",
+                            required_state: [],
+                            timeline: [mkOwnStateEvent(EventType.RoomCreate, {}, "")],
+                            initial: true,
+                        },
+                    },
+                ]);
+            await (sdk as unknown as { rehydrateFromCache: () => Promise<void> }).rehydrateFromCache();
+
+            // Painted from cache, but NOT yet verifiably current → unread stays provisional.
+            expect(client!.getRoom(roomId)).toBeTruthy();
+            expect(sdk!.hasLiveSynced(roomId)).toBe(false);
+        });
+    });
 });

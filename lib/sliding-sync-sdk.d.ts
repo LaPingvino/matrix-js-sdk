@@ -23,6 +23,14 @@ export declare class SlidingSyncSdk {
     private notifEvents;
     /** True while replaying cached rooms on boot, so onRoomData doesn't re-persist them. */
     private rehydrating;
+    /**
+     * Rooms that have received a genuine LIVE sliding-sync response this session (NOT a
+     * cache rehydrate). Monotonic — a room never leaves once it's in. Consumers use this
+     * to decide whether a room's data (e.g. its unread count) is trustworthy-current vs a
+     * possibly-stale cached value: sliding sync loads rooms partially/incrementally, so a
+     * rehydrated-but-not-yet-live room's count must be treated as provisional.
+     */
+    private readonly liveSyncedRooms;
     constructor(slidingSync: SlidingSync, client: MatrixClient, opts: IStoredClientOpts | undefined, syncOpts: SyncApiOptions);
     private onRoomData;
     private onLifecycle;
@@ -78,6 +86,12 @@ export declare class SlidingSyncSdk {
     injectRoomEvents(room: Room, stateEventList: MatrixEvent[], timelineEventList?: MatrixEvent[], numLive?: number): Promise<void>;
     private resolveInvites;
     retryImmediately(): boolean;
+    /**
+     * Whether the given room has received a genuine LIVE sliding-sync response this session
+     * (as opposed to only being painted from the boot cache). Consumers use this to gate
+     * trust in a room's current data — see {@link liveSyncedRooms}.
+     */
+    hasLiveSynced(roomId: string): boolean;
     /**
      * Paint from cache before the network answers: replay every persisted room's
      * data through the SAME ingestion path a live response takes ({@link onRoomData}
