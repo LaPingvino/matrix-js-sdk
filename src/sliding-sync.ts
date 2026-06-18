@@ -729,6 +729,27 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
     }
 
     /**
+     * Wake the sync loop NOW: abort the in-flight long-poll and immediately re-issue the request so
+     * any data the server is already holding is delivered without waiting for the long-poll timeout.
+     *
+     * This exists for a consumer-side latency workaround: some homeservers (notably Continuwuity's
+     * simplified-sliding-sync `v5` handler) wake their long-poll when new data arrives but then
+     * return the response they computed BEFORE the wait — i.e. an empty payload with an advanced
+     * pos — so fresh events only surface on the NEXT round-trip. A consumer can run a cheap classic
+     * `/sync` "heartbeat" (which DOES wake-and-rebuild on every server) and call `poke()` whenever it
+     * returns, collapsing incoming-message latency to near-instant regardless of the bug. With this
+     * in place the base `timeoutMS` can stay long (idle-cheap) while latency stays low.
+     *
+     * Reuses the same intentional-abort path as {@link resend} (no backoff, no sticky-param reset).
+     * Safe to call before start() or after stop() (no-op). Frequent calls are fine, but the caller
+     * should coalesce bursts (debounce) so a flurry of activity doesn't issue a request per event.
+     */
+    public poke(): void {
+        if (this.terminated) return;
+        this.resend();
+    }
+
+    /**
      * Stop syncing with the server.
      */
     public stop(): void {
