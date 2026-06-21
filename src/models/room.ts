@@ -1662,7 +1662,33 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
      *                  for this type.
      */
     public getRoomUnreadNotificationCount(type = NotificationCountType.Total): number {
-        return this.notificationCounts[type] ?? 0;
+        const count = this.notificationCounts[type] ?? 0;
+        if (count <= 0) return count;
+        // The server's notification count is unreliable under sliding sync: it counts member/state
+        // noise and does not reliably clear on read, so it reports unread for rooms we've already read
+        // (inflating room-list badges and space aggregates that creep up over time). addReceipt()
+        // already zeroes the count when our receipt lands on the last event, but the server then
+        // re-echoes a fresh count on the next sliding-sync update with no new receipt to re-trigger
+        // that reset — so it climbs back. Defend on READ too: if our read receipt points at the last
+        // known event, the room IS read — report 0 regardless of what the server said. Only runs when
+        // the server claims unread (count > 0), so the common case stays free, and it self-heals.
+        //
+        // Compare receipt event-id to last event-id DIRECTLY — no findEventById/compareEventOrdering.
+        // Under sliding sync the receipt's own event has usually scrolled out of the loaded window, so
+        // anything that has to resolve it by position (e.g. hasUserReadEvent) returns "unknown" and the
+        // clamp would silently never fire — exactly when it's needed. The raw receipt always carries
+        // its event-id, so an id match is reliable regardless of what's currently loaded.
+        const latestId = this.timeline[this.timeline.length - 1]?.getId();
+        if (!latestId) return count;
+        // Only a REAL (non-synthetic) read receipt counts as "the user read this". Synthetic receipts
+        // are the SDK's own guesses (e.g. from our own sends, or generated during sync) and must NOT
+        // silently clear unreads — same deliberate exclusion as addReceipt's `!synthetic` reset above.
+        const readAtLatest = (receiptType: ReceiptType): boolean =>
+            this.getReadReceiptForUserId(this.myUserId, true, receiptType)?.eventId === latestId;
+        if (readAtLatest(ReceiptType.Read) || readAtLatest(ReceiptType.ReadPrivate)) {
+            return 0;
+        }
+        return count;
     }
 
     /**

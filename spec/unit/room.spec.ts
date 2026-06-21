@@ -1526,6 +1526,29 @@ describe("Room", function () {
                     expect(room.getUnreadNotificationCount(NotificationCountType.Highlight)).toEqual(0);
                 });
 
+                it("stays 0 when the server re-echoes a count after we've read the latest event, even if that event is not loaded (sliding-sync robustness)", () => {
+                    // Given a read room — our receipt is on the latest event — but the events are NOT
+                    // indexed in the timeline. This is the sliding-sync reality: the receipt's own event
+                    // has scrolled out of the tiny loaded window, so anything that resolves it by
+                    // position (findEventById / compareEventOrdering / hasUserReadEvent) returns
+                    // "unknown". The clamp must rely on a direct receipt-id match instead.
+                    room.client.isInitialSyncComplete = jest.fn().mockReturnValue(true);
+                    jest.spyOn(room, "timeline", "get").mockReturnValue([event1, event2]);
+                    room.addReceipt(mkReceipt(roomId, [mkRecord(event2.getId()!, "m.read", userA, 123)]));
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Total)).toEqual(0);
+
+                    // ...when the server re-sends a stale/growing notification_count on a later
+                    // sliding-sync update (no new receipt to clear it again)...
+                    room.setUnread(NotificationCountType.Total, 45);
+                    room.setUnread(NotificationCountType.Highlight, 57);
+
+                    // ...the read accessor must STILL report 0: a read room is read regardless of what
+                    // the server's count says. (A clamp using hasUserReadEvent returned 45 here because
+                    // the events aren't indexed — exactly the gap a direct id comparison closes.)
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Total)).toEqual(0);
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Highlight)).toEqual(0);
+                });
+
                 it("should not reset the unread count when someone else's receipt points to the latest event", () => {
                     // Given a room with 2 events, and an unread count set.
                     room.client.isInitialSyncComplete = jest.fn().mockReturnValue(true);
