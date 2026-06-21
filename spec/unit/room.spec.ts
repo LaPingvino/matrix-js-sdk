@@ -2308,6 +2308,35 @@ describe("Room", function () {
             expect(room.getAvatarFallbackMember()?.userId).toBe(userD);
         });
 
+        it("never returns self even when the server includes us in heroes (sliding-sync / bridged channels)", () => {
+            const room = new Room(roomId, new TestClient(userA).client, userA);
+            room.currentState.markOutOfBandMembersStarted();
+            room.currentState.setOutOfBandMembers([
+                new MatrixEvent({
+                    type: EventType.RoomMember,
+                    state_key: userA,
+                    sender: userA,
+                    content: { membership: KnownMembership.Join },
+                }),
+                new MatrixEvent({
+                    type: EventType.RoomMember,
+                    state_key: userD,
+                    sender: userD,
+                    content: { membership: KnownMembership.Join },
+                }),
+            ]);
+            // Server hands back heroes that wrongly include US (first) — e.g. a bridged broadcast
+            // channel where we're the primary member. The avatar must NOT resolve to our own face.
+            room.setSummary({
+                "m.heroes": [userA, userD],
+                "m.joined_member_count": 2,
+                "m.invited_member_count": 0,
+            });
+            const fallback = room.getAvatarFallbackMember();
+            expect(fallback?.userId).not.toBe(userA);
+            expect(fallback?.userId).toBe(userD);
+        });
+
         it("should return undefined if the room is a 1:1 plus functional member", async function () {
             const room = new Room(roomId, null!, userA);
             await room.currentState.setStateEvents([

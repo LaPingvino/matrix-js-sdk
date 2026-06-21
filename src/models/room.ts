@@ -983,7 +983,13 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
         if (nonFunctionalMemberCount > 2) return;
 
         // Prefer the list of heroes, if present. It should only include the single other user in the DM.
-        const nonFunctionalHeroes = this.heroes?.filter((h) => !functionalMembers.includes(h.userId));
+        // Also exclude SELF: the spec says heroes omit the syncing user, but under sliding sync (and for
+        // bridged broadcast channels where you're the primary member) the server can hand back heroes
+        // that include you — and without this guard the avatar would resolve to YOUR face. This aligns
+        // the hero path with the member fallback below, which already excludes self.
+        const nonFunctionalHeroes = this.heroes?.filter(
+            (h) => !functionalMembers.includes(h.userId) && h.userId !== this.myUserId,
+        );
         const hasHeroes = Array.isArray(nonFunctionalHeroes) && nonFunctionalHeroes.length;
         if (hasHeroes) {
             // use first hero that has a display name or avatar url, or whose user ID
