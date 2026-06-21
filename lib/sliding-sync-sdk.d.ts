@@ -35,8 +35,24 @@ export declare class SlidingSyncSdk {
     private onRoomData;
     private onLifecycle;
     /**
+     * Lazily-created classic SyncApi used SOLELY for the isolated one-shot /sync that
+     * fetches left rooms (see {@link syncLeftRooms}). It is never started (.sync() is
+     * not called), so it runs no live loop and does not compete with the sliding-sync
+     * transport — it only issues a single filtered request on demand.
+     */
+    private leftRoomsSyncApi?;
+    /**
      * Sync rooms the user has left.
-     * @returns Resolved when they've been added to the store.
+     *
+     * Simplified sliding sync (MSC4186) has no "left rooms" section — its lists range
+     * over JOINED rooms — so historical/archived rooms must be fetched explicitly. The
+     * classic `/sync` endpoint is transport-independent and still serves a filtered
+     * `include_leave` request, so we delegate to the classic SyncApi's well-tested
+     * implementation (a single isolated `timeout=0` request that injects the left rooms
+     * into the store) rather than duplicating the room-injection logic here. This is
+     * what backs the "show archived/left rooms" affordance under sliding sync.
+     *
+     * @returns Resolved with the left rooms once they've been added to the store.
      */
     syncLeftRooms(): Promise<Room[]>;
     /**

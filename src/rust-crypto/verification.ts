@@ -504,20 +504,9 @@ abstract class BaseRustVerifer<InnerType extends RustSdkCryptoJs.Qr | RustSdkCry
      */
     protected onChange(): void {
         if (this.inner.isDone()) {
-            // eslint-disable-next-line no-console
-            console.warn("[sdk][verify] verifier onChange: DONE");
             this.completionDeferred.resolve(undefined);
         } else if (this.inner.isCancelled()) {
             const cancelInfo = this.inner.cancelInfo()!;
-            // Decisive log: if mismatch()/cancel() above did NOT fire but this
-            // reports cancelledByUs with m.mismatched_sas, the rust core emitted
-            // the cancel itself (not the app/JS).
-            // eslint-disable-next-line no-console
-            console.warn(
-                `[sdk][verify] verifier onChange: CANCELLED by ${
-                    cancelInfo.cancelledbyUs() ? "US" : "THEM"
-                } code=${cancelInfo.cancelCode()} reason=${cancelInfo.reason()}`,
-            );
             this.completionDeferred.reject(
                 new Error(
                     `Verification cancelled by ${
@@ -731,26 +720,18 @@ export class RustSASVerifier extends BaseRustVerifer<RustSdkCryptoJs.Sas> implem
             this.callbacks = {
                 sas,
                 confirm: async (): Promise<void> => {
-                    // eslint-disable-next-line no-console
-                    console.warn("[sdk][verify] ShowSasCallbacks.confirm() called");
                     const requests: Array<OutgoingRequest> = await this.inner.confirm();
-                    // eslint-disable-next-line no-console
-                    console.warn(`[sdk][verify] confirm() produced ${requests.length} outgoing request(s)`);
                     for (const m of requests) {
                         await this.outgoingRequestProcessor.makeOutgoingRequest(m);
                     }
                 },
                 mismatch: (): void => {
-                    // eslint-disable-next-line no-console
-                    console.warn("[sdk][verify] ShowSasCallbacks.mismatch() called — JS-originated m.mismatched_sas", new Error("mismatch() call site").stack);
                     const request = this.inner.cancelWithCode("m.mismatched_sas");
                     if (request) {
                         this.outgoingRequestProcessor.makeOutgoingRequest(request);
                     }
                 },
                 cancel: (): void => {
-                    // eslint-disable-next-line no-console
-                    console.warn("[sdk][verify] ShowSasCallbacks.cancel() called — JS-originated m.user", new Error("cancel() call site").stack);
                     const request = this.inner.cancelWithCode("m.user");
                     if (request) {
                         this.outgoingRequestProcessor.makeOutgoingRequest(request);
