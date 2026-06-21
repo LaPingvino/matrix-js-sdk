@@ -83,7 +83,7 @@ export declare class RustCrypto extends TypedEventEmitter<RustCryptoEvents, Cryp
     set globalErrorOnUnknownDevices(_v: boolean);
     get globalErrorOnUnknownDevices(): boolean;
     stop(): void;
-    encryptEvent(event: MatrixEvent, _room: Room): Promise<void>;
+    encryptEvent(event: MatrixEvent, room: Room): Promise<void>;
     decryptEvent(event: MatrixEvent): Promise<IEventDecryptionResult>;
     /**
      * Implementation of {@link CryptoBackend#getBackupDecryptor}.

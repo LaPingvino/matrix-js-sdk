@@ -267,9 +267,24 @@ export class RustCrypto extends TypedEventEmitter<RustCryptoEvents, CryptoEventH
         this.olmMachine.close();
     }
 
-    public async encryptEvent(event: MatrixEvent, _room: Room): Promise<void> {
+    public async encryptEvent(event: MatrixEvent, room: Room): Promise<void> {
         const roomId = event.getRoomId()!;
-        const encryptor = this.roomEncryptors[roomId];
+        let encryptor = this.roomEncryptors[roomId];
+
+        if (!encryptor) {
+            // The room can be encrypted yet have no registered encryptor: under sliding sync the
+            // m.room.encryption state event may arrive (or be rehydrated from cache) without flowing
+            // through onCryptoEvent, or land a beat after the room first becomes sendable. Rather than
+            // failing the send (which surfaces to the user as "state not up to date"), register the
+            // encryptor on demand from the room's own encryption state event and carry on. This is the
+            // priority-fetch philosophy under sliding sync: load what we need, the moment we need it,
+            // so the partial-state window is invisible instead of a hard failure.
+            const encEvent = room?.currentState?.getStateEvents(EventType.RoomEncryption, "");
+            if (encEvent) {
+                await this.onCryptoEvent(room, encEvent);
+                encryptor = this.roomEncryptors[roomId];
+            }
+        }
 
         if (!encryptor) {
             throw new Error(`Cannot encrypt event in unconfigured room ${roomId}`);
