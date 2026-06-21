@@ -1053,8 +1053,25 @@ export class SlidingSyncSdk {
     public async sync(): Promise<void> {
         this.syncOpts.logger.debug("Sliding sync init loop");
 
-        //   1) We need to get push rules so we can check if events should bing as we get
-        //      them from /sync.
+        // Paint from the persistent per-room cache FIRST — before anything that
+        // touches the network — so the UI has rooms/timelines/state immediately
+        // (the sliding-sync equivalent of classic sync's getSavedSync() rehydrate).
+        // This deliberately runs ahead of the push-rules fetch below: the rehydrate
+        // is a purely local replay and does NOT need push rules to be correct. Room
+        // unread COUNTS come from each cached room's server `unread_notifications`
+        // (setUnreadNotificationCount), not from push evaluation; the only push
+        // computation the replay triggers is on STATE events (addRoomEvents pre-
+        // freezes their push actions to avoid a read-only crash), and state events
+        // are never highlights, so a null ruleset there is a graceful no-op. Keeping
+        // first paint off the network path is the whole point — a slow getPushRules()
+        // round-trip used to gate the cached paint behind it. Strictly sequential:
+        // no overlap, no race. Live initial=true responses dedupe against what we
+        // replay here; best-effort, never fatal.
+        await this.rehydrateFromCache();
+
+        //   1) We need push rules so we can check if events should bing as we get them
+        //      from the LIVE sync. This must complete before the live loop opens (below),
+        //      but it no longer blocks first paint — the cache replay above already ran.
         while (!this.client.isGuest()) {
             try {
                 this.syncOpts.logger.debug("Getting push rules...");
@@ -1069,13 +1086,6 @@ export class SlidingSyncSdk {
                 }
             }
         }
-
-        // Paint from the persistent per-room cache BEFORE opening the live sync, so
-        // the UI has rooms/timelines/state immediately (the sliding-sync equivalent
-        // of classic sync's getSavedSync() rehydrate). Live initial=true responses
-        // then dedupe against what we just replayed. Awaited so the room model is
-        // warm before the live merge; best-effort, never fatal.
-        await this.rehydrateFromCache();
 
         // Seed the GLOBAL account data the room list is categorised by. Sliding
         // sync (Continuwuity) only resends global account_data that CHANGED since

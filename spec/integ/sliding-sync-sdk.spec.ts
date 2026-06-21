@@ -1288,4 +1288,47 @@ describe("SlidingSyncSdk", () => {
             expect(sdk!.hasLiveSynced(roomId)).toBe(false);
         });
     });
+
+    // First paint must NOT be gated on the network. The cache rehydrate is a purely
+    // local replay; getPushRules() is a network round-trip only needed to evaluate
+    // LIVE events. Regression guard for the reorder in sync(): if someone moves the
+    // push-rules fetch back ahead of the rehydrate, a slow/flaky /pushrules endpoint
+    // blanks the whole app on boot again.
+    describe("boot ordering (rehydrate paints before the push-rules round-trip)", () => {
+        beforeAll(async () => {
+            await setupClient();
+        });
+        afterAll(teardownClient);
+
+        it("paints cached rooms before getPushRules resolves", async () => {
+            const roomId = "!boot-paint:localhost";
+            (sdk as unknown as { roomCache: { loadAll: jest.Mock } }).roomCache.loadAll = jest
+                .fn()
+                .mockResolvedValue([
+                    {
+                        roomId,
+                        data: {
+                            name: "Cached",
+                            required_state: [],
+                            timeline: [mkOwnStateEvent(EventType.RoomCreate, {}, "")],
+                            initial: true,
+                        },
+                    },
+                ]);
+
+            // Start the boot sequence but DO NOT flush the pending /pushrules request:
+            // MockHttpBackend leaves it outstanding until flushAllExpected() below.
+            const hasSynced = sdk!.sync();
+
+            // The room is painted from cache while the push-rules network call is still
+            // pending — proving the local replay runs first. (If the order regressed,
+            // sync() would be blocked awaiting /pushrules and this would hang/fail.)
+            await emitPromise(client!, ClientEvent.Room);
+            expect(client!.getRoom(roomId)).toBeTruthy();
+
+            // Let the rest of boot (push rules + live start) complete + clean up.
+            await httpBackend!.flushAllExpected();
+            await hasSynced;
+        });
+    });
 });
