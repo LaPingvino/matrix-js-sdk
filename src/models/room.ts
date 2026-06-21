@@ -906,7 +906,7 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
      *     according to `m.direct`.
      */
     public getDirectUserId(): string | null {
-        const content = this.client.getAccountData(EventType.Direct)?.getContent<Record<string, string[]>>();
+        const content = this.client?.getAccountData(EventType.Direct)?.getContent<Record<string, string[]>>();
         if (!content) return null;
         for (const userId in content) {
             if (userId === this.myUserId) continue;
