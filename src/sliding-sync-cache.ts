@@ -69,6 +69,16 @@ interface CachedRoomRecord {
      * Persisting + replaying our marker makes the cached paint self-consistent.
      */
     receipt?: IMinimalEvent;
+    /**
+     * The room's per-room account_data at persist time (m.tag for favourites,
+     * m.marked_unread, …). Like the receipt, these ride a SEPARATE sliding-sync
+     * extension, so they are NOT part of MSC3575RoomData and would be lost across
+     * reloads — favourites (the m.tag "pinned" state) would then revert until the
+     * live account_data extension re-delivers them. Persist + replay so room.tags
+     * is populated on the cached paint. (The general fix for "late sliding-sync
+     * state reverts on reload": keep the last-known value until the live one lands.)
+     */
+    accountData?: IMinimalEvent[];
     /** Sort key for eviction + replay order (recency). */
     bump: number;
     /** Wall-clock of last write, for tie-breaking / diagnostics. */
@@ -162,7 +172,9 @@ export class SlidingSyncCache {
      * curated {@link MSC3575RoomData} with `initial`/`limited` forced so the caller
      * can feed it straight through the live ingestion path.
      */
-    public async loadAll(): Promise<{ roomId: string; data: MSC3575RoomData; receipt?: IMinimalEvent }[]> {
+    public async loadAll(): Promise<
+        { roomId: string; data: MSC3575RoomData; receipt?: IMinimalEvent; accountData?: IMinimalEvent[] }[]
+    > {
         const db = await this.open();
         if (!db) return [];
         try {
@@ -194,7 +206,12 @@ export class SlidingSyncCache {
             });
             return records
                 .filter((r) => r && r.schema === SCHEMA_VERSION && r.data && r.roomId)
-                .map((r) => ({ roomId: r.roomId, data: { ...r.data, initial: true, limited: true }, receipt: r.receipt }));
+                .map((r) => ({
+                    roomId: r.roomId,
+                    data: { ...r.data, initial: true, limited: true },
+                    receipt: r.receipt,
+                    accountData: r.accountData,
+                }));
         } catch (e) {
             this.logger.warn("[sss-cache] loadAll failed", e);
             return [];
@@ -202,13 +219,19 @@ export class SlidingSyncCache {
     }
 
     /** Queue a room's data for persistence (debounced + coalesced). */
-    public put(roomId: string, data: MSC3575RoomData, receipt?: IMinimalEvent): void {
+    public put(
+        roomId: string,
+        data: MSC3575RoomData,
+        receipt?: IMinimalEvent,
+        accountData?: IMinimalEvent[],
+    ): void {
         if (this.closed || !this.idb || cacheDisabled()) return;
         try {
             this.pending.set(roomId, {
                 roomId,
                 data: curate(data),
                 receipt,
+                accountData,
                 bump: data.bump_stamp ?? Date.now(),
                 ts: Date.now(),
                 schema: SCHEMA_VERSION,

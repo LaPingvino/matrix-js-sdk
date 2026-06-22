@@ -1233,6 +1233,29 @@ describe("SlidingSyncSdk", () => {
             expect(room).toBeTruthy();
             expect(room!.getEventReadUpTo(selfUserId, true)).toBeNull();
         });
+
+        it("replays persisted per-room account_data (m.tag) so favourites don't revert on reload", async () => {
+            // Room tags ride a separate extension (not MSC3575RoomData), so without
+            // persisting them the rehydrated room loses room.tags and a favourited room
+            // reverts to un-pinned until the live account_data arrives. Replaying the
+            // cached m.tag restores it on the cached paint.
+            const favRoomId = "!fav:localhost";
+            const data = mkRoomData(baseTimeline(mkOtherEvent("hi")));
+            const tagEvent = {
+                type: EventType.Tag,
+                content: { tags: { "m.favourite": { order: 0.5 } } },
+            };
+
+            (sdk as unknown as { roomCache: { loadAll: jest.Mock } }).roomCache.loadAll = jest
+                .fn()
+                .mockResolvedValue([{ roomId: favRoomId, data, accountData: [tagEvent] }]);
+
+            await (sdk as unknown as { rehydrateFromCache: () => Promise<void> }).rehydrateFromCache();
+
+            const room = client!.getRoom(favRoomId);
+            expect(room).toBeTruthy();
+            expect(room!.tags["m.favourite"]).toBeTruthy();
+        });
     });
 
     // The "verifiably loaded this session" signal that drives confidence-gated unread badges:

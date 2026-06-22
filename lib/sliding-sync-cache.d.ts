@@ -22,9 +22,10 @@ export declare class SlidingSyncCache {
         roomId: string;
         data: MSC3575RoomData;
         receipt?: IMinimalEvent;
+        accountData?: IMinimalEvent[];
     }[]>;
     /** Queue a room's data for persistence (debounced + coalesced). */
-    put(roomId: string, data: MSC3575RoomData, receipt?: IMinimalEvent): void;
+    put(roomId: string, data: MSC3575RoomData, receipt?: IMinimalEvent, accountData?: IMinimalEvent[]): void;
     /** Write all pending records, then evict down to MAX_ROOMS by lowest bump. */
     flush(): Promise<void>;
     private evict;

@@ -458,7 +458,14 @@ export class SlidingSyncSdk {
                         content: { [readUpToId]: { "m.read": { [uid]: { ts } } } },
                     } as IMinimalEvent;
                 }
-                this.roomCache.put(roomId, roomData, receipt);
+                // Persist the room's per-room account_data (m.tag favourites,
+                // m.marked_unread, …) too: it rides a separate extension and isn't in
+                // MSC3575RoomData, so without this the rehydrated room loses room.tags
+                // and favourites revert on reload until the live account_data arrives.
+                const accountData: IMinimalEvent[] = Array.from(room!.accountData.values()).map(
+                    (e) => ({ type: e.getType(), content: e.getContent() }) as IMinimalEvent,
+                );
+                this.roomCache.put(roomId, roomData, receipt, accountData.length ? accountData : undefined);
             }
         } catch (e) {
             // Resilience: one malformed room must not break sliding sync (it
@@ -1037,7 +1044,7 @@ export class SlidingSyncSdk {
      * leaves us with today's cold start.
      */
     private async rehydrateFromCache(): Promise<void> {
-        let rooms: { roomId: string; data: MSC3575RoomData; receipt?: IMinimalEvent }[];
+        let rooms: { roomId: string; data: MSC3575RoomData; receipt?: IMinimalEvent; accountData?: IMinimalEvent[] }[];
         try {
             rooms = await this.roomCache.loadAll();
         } catch (e) {
@@ -1048,7 +1055,7 @@ export class SlidingSyncSdk {
         this.syncOpts.logger.debug(`[sss-cache] rehydrating ${rooms.length} rooms from cache`);
         this.rehydrating = true;
         try {
-            for (const { roomId, data, receipt } of rooms) {
+            for (const { roomId, data, receipt, accountData } of rooms) {
                 await this.onRoomData(roomId, data);
                 // Replay our persisted read receipt AFTER the timeline exists, so the
                 // read marker lands on an event we have and the unread count is right
@@ -1058,6 +1065,19 @@ export class SlidingSyncSdk {
                         processEphemeralEvents(this.client, roomId, [receipt]);
                     } catch (e) {
                         this.syncOpts.logger.debug("[sss-cache] receipt replay failed", e);
+                    }
+                }
+                // Replay per-room account_data (m.tag favourites, m.marked_unread, …)
+                // so room.tags is populated on the cached paint — otherwise favourites
+                // revert on reload until the live account_data extension re-delivers
+                // them. addAccountData sets room.tags AND emits RoomEvent.Tags/AccountData,
+                // so reactive consumers update too. The live response overwrites this.
+                if (accountData?.length) {
+                    try {
+                        const room = this.client.getRoom(roomId);
+                        if (room) room.addAccountData(mapEvents(this.client, roomId, accountData));
+                    } catch (e) {
+                        this.syncOpts.logger.debug("[sss-cache] account_data replay failed", e);
                     }
                 }
             }
