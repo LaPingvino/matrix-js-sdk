@@ -79,6 +79,24 @@ export interface IMentions {
     user_ids?: string[];
     room?: boolean;
 }
+/**
+ * A bundled URL preview carried inside the event content — the spec'd MSC4095
+ * `m.url_previews` key, or the unstable `com.beeper.linkpreviews` that mautrix-*
+ * bridges emit (e.g. WhatsApp Channel link posts). Each entry is an Open Graph
+ * map plus `matched_url`; `og:image` is an `mxc://` the consumer resolves via
+ * `mxcUrlToHttp`. See {@link MatrixEvent.getUrlPreviews}.
+ */
+export interface IUrlPreview {
+    [key: string]: undefined | string | number;
+    matched_url?: string;
+    "og:title"?: string;
+    "og:description"?: string;
+    "og:image"?: string;
+    "og:image:width"?: number;
+    "og:image:height"?: number;
+    "og:image:type"?: string;
+    "matrix:image:size"?: number;
+}
 export interface PushDetails {
     rule?: IAnnotatedPushRule;
     actions?: IActionsObject;
@@ -352,6 +370,14 @@ export declare class MatrixEvent extends TypedEventEmitter<MatrixEventEmittedEve
      * @returns The event content JSON, or an empty object.
      */
     getContent<T extends IContent = IContent>(): T;
+    /**
+     * Bundled URL previews carried in this event's content, if any. Reads the
+     * spec'd MSC4095 `m.url_previews` key, falling back to the unstable
+     * `com.beeper.linkpreviews` (what mautrix-* bridges send). One parser so every
+     * consumer agrees on the key — apps just render the returned Open Graph maps
+     * (resolving each `og:image` mxc via `mxcUrlToHttp`). Returns [] when absent.
+     */
+    getUrlPreviews(): IUrlPreview[];
     /**
      * Get the (possibly encrypted) event content JSON that will be sent to the
      * homeserver.
