@@ -96,12 +96,12 @@ export declare class SlidingSyncSdk {
      * at the *END* of the timeline list if it is supplied.
      * @param timelineEventList - A list of timeline events. Lower index
      * is earlier in time. Higher index is later.
-     * @param numLive - the number of trailing events in timelineEventList which just
-     * happened (and so should fire as live, not fromCache). Derived by the caller from
-     * the sync stream — NOT taken from the server's num_live, which Continuwuity and
-     * other non-Synapse servers leave unset. See processRoomData for the derivation.
+     * @param fromCache - whether these timeline events are a historical paint (cold catch-up
+     * or cache replay) rather than live activity. Derived by the caller from the sync stream
+     * (see processRoomData) — the server's num_live is ignored, since Continuwuity and other
+     * non-Synapse servers leave it unset. Drives the RoomEvent.Timeline liveEvent flag.
      */
-    injectRoomEvents(room: Room, stateEventList: MatrixEvent[], timelineEventList?: MatrixEvent[], numLive?: number): Promise<void>;
+    injectRoomEvents(room: Room, stateEventList: MatrixEvent[], timelineEventList?: MatrixEvent[], fromCache?: boolean): Promise<void>;
     private resolveInvites;
     retryImmediately(): boolean;
     /**
