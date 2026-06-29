@@ -96,8 +96,10 @@ export declare class SlidingSyncSdk {
      * at the *END* of the timeline list if it is supplied.
      * @param timelineEventList - A list of timeline events. Lower index
      * is earlier in time. Higher index is later.
-     * @param numLive - the number of events in timelineEventList which just happened,
-     * supplied from the server.
+     * @param numLive - the number of trailing events in timelineEventList which just
+     * happened (and so should fire as live, not fromCache). Derived by the caller from
+     * the sync stream — NOT taken from the server's num_live, which Continuwuity and
+     * other non-Synapse servers leave unset. See processRoomData for the derivation.
      */
     injectRoomEvents(room: Room, stateEventList: MatrixEvent[], timelineEventList?: MatrixEvent[], numLive?: number): Promise<void>;
     private resolveInvites;

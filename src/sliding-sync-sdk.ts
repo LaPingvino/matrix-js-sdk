@@ -839,7 +839,35 @@ export class SlidingSyncSdk {
             }
         } */
 
-        await this.injectRoomEvents(room, stateEvents, timelineEvents, roomData.num_live);
+        // Derive liveness ourselves instead of trusting the server's num_live.
+        // This SDK fork deliberately does NOT assume Synapse/MSC4186-proxy behavior:
+        // Continuwuity (v5.rs) sends num_live: null, and the upstream Element code read
+        // that as "0 live", so EVERY event went through addLiveEvents({fromCache:true}).
+        // That makes EventTimelineSet emit RoomEvent.Timeline with liveEvent:false
+        // (event-timeline-set.ts: `liveEvent: ... && !fromCache`), and every consumer
+        // gates new-message handling on data.liveEvent — so unread counts, notifications,
+        // sounds and room reordering were all skipped. Bridged messages (mautrix-*, whose
+        // origin_server_ts is often in the past and which live in low-traffic portal rooms)
+        // were the most visible victims: they arrived silently.
+        //
+        // We don't need the server to tell us what's live. The dedup split above already
+        // reduced `timelineEvents` to exactly the events that are neither duplicates nor
+        // scrollback — i.e. the genuinely-new ones. They're live UNLESS this is the room's
+        // first paint this session, which is a historical catch-up, not new activity.
+        //
+        // We key that off `liveSyncedRooms`, NOT roomData.initial. Continuwuity sets
+        // initial:true (roomsince==0, v5.rs) in TWO cases: the genuine cold catch-up AND a
+        // *known* room merely re-entering the sliding window mid-session ("0 means unknown
+        // because it got out of date"). Using `initial ? 0` would re-suppress live events
+        // for that second case — reopening the very silent-bridge-message bug this fixes.
+        // `liveSyncedRooms.has` is false only on a room's FIRST live response (it's added
+        // in onRoomData AFTER us, and skipped during rehydrate), so: first paint / cache
+        // replay → 0 live (no notification storm on boot); every later response, including
+        // a window re-entry → genuinely-new events fire live. (Scrollback was already
+        // routed to addEventsToTimeline with toStartOfTimeline=true, liveEvent:false.)
+        const firstPaint = !this.liveSyncedRooms.has(room.roomId);
+        const numLive = firstPaint ? 0 : timelineEvents.length;
+        await this.injectRoomEvents(room, stateEvents, timelineEvents, numLive);
 
         // we deliberately don't add ephemeral events to the timeline
         room.addEphemeralEvents(ephemeralEvents);
@@ -898,8 +926,10 @@ export class SlidingSyncSdk {
      * at the *END* of the timeline list if it is supplied.
      * @param timelineEventList - A list of timeline events. Lower index
      * is earlier in time. Higher index is later.
-     * @param numLive - the number of events in timelineEventList which just happened,
-     * supplied from the server.
+     * @param numLive - the number of trailing events in timelineEventList which just
+     * happened (and so should fire as live, not fromCache). Derived by the caller from
+     * the sync stream — NOT taken from the server's num_live, which Continuwuity and
+     * other non-Synapse servers leave unset. See processRoomData for the derivation.
      */
     public async injectRoomEvents(
         room: Room,
