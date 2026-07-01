@@ -716,6 +716,15 @@ export class SlidingSyncSdk {
             // events between/after known events are treated as live: worst case
             // they append slightly out of order (the display layers sort), which
             // beats hiding them at the start of the timeline.
+            // NO overlap at all with what we hold? Then nothing here is provably
+            // scrollback — this is a brand-new room, or a burst that overflowed
+            // the window past everything we know (WhatsApp-bridge bursts do this
+            // constantly). These MUST go through the live path: the scrollback
+            // path (addEventsToTimeline) emits no live Timeline events, so an
+            // open room would silently never update. The gap between our old
+            // tail and this window stays missing until back-pagination — the
+            // known, lesser evil (see the limited-gap item in the conn_id plan).
+            const anyKnown = timelineEvents.some((e) => knownEvents.has(e.getId()!));
             const oldEvents: MatrixEvent[] = [];
             const newEvents: MatrixEvent[] = [];
             let seenKnownEvent = false;
@@ -725,8 +734,9 @@ export class SlidingSyncSdk {
                     seenKnownEvent = true;
                     continue; // don't include this event, it's a dupe
                 }
-                if (seenKnownEvent) {
-                    // newer than the oldest event we already hold: live, not scrollback
+                if (seenKnownEvent || !anyKnown) {
+                    // newer than the oldest event we already hold (or no anchor
+                    // at all): live, not scrollback
                     newEvents.push(recvEvent);
                 } else {
                     // older than everything we hold: scrollback.

@@ -590,6 +590,46 @@ describe("SlidingSyncSdk", () => {
                     // it must NOT be at the start of the timeline.
                     expect(got).toEqual([eventD.event_id, eventF.event_id, eventE.event_id]);
                 });
+
+                it("treats a limited window with NO known events as live, not scrollback", async () => {
+                    // A bridge burst overflowing the window produces a limited response
+                    // whose events have zero overlap with what we hold. They must go
+                    // through the LIVE path (appended, Timeline events emitted) — the
+                    // scrollback path would prepend them silently and an open room
+                    // would never update until reload.
+                    const roomId = "!z_burst_gap:localhost";
+                    const eventOld = mkOwnEvent(EventType.RoomMessage, { body: "before the burst" });
+                    const burst1 = mkOwnEvent(EventType.RoomMessage, { body: "burst 1" });
+                    const burst2 = mkOwnEvent(EventType.RoomMessage, { body: "burst 2" });
+                    mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomId, {
+                        name: "Z2",
+                        required_state: [
+                            mkOwnStateEvent(EventType.RoomCreate, {}, ""),
+                            mkOwnStateEvent(EventType.RoomMember, { membership: KnownMembership.Join }, selfUserId),
+                            mkOwnStateEvent(EventType.RoomPowerLevels, { users: { [selfUserId]: 100 } }, ""),
+                        ],
+                        timeline: [eventOld],
+                        initial: true,
+                    });
+                    await emitPromise(client!, ClientEvent.Room);
+                    // The burst: limited, and nothing in the window overlaps eventOld.
+                    mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomId, {
+                        name: "Z2",
+                        required_state: [],
+                        timeline: [burst1, burst2],
+                        limited: true,
+                        prev_batch: "burst-batch-token",
+                    });
+                    await new Promise((r) => setTimeout(r, 0));
+                    const got = client!
+                        .getRoom(roomId)!
+                        .getLiveTimeline()
+                        .getEvents()
+                        .filter((e) => e.getType() === EventType.RoomMessage)
+                        .map((e) => e.getId());
+                    // Burst events APPENDED after what we had, never prepended before it.
+                    expect(got).toEqual([eventOld.event_id, burst1.event_id, burst2.event_id]);
+                });
             });
         });
     });
