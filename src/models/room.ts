@@ -376,6 +376,12 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
     // flags to stop logspam about missing m.room.create events
     private getTypeWarning = false;
     private membersPromise?: Promise<boolean>;
+    // True once a full /members response has been applied this session. The
+    // encryption path uses this to guarantee the megolm recipient set is
+    // computed from a complete roster, not the $LAZY slice sliding sync
+    // delivers (see getEncryptionTargetMembers). Reset by
+    // invalidateLoadedMembers when the roster is known stale.
+    private fullRosterFetched = false;
 
     // XXX: These should be read-only
     /**
@@ -1155,6 +1161,9 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
         const inMemoryUpdate = this.loadMembers()
             .then((result) => {
                 this.currentState.setOutOfBandMembers(result.memberEvents);
+                if (result.fromServer) {
+                    this.fullRosterFetched = true;
+                }
                 return result.fromServer;
             })
             .catch((err) => {
@@ -1217,6 +1226,7 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
             .then((rawMembers) => {
                 const memberEvents = rawMembers.filter(noUnsafeEventProps).map(this.client.getEventMapper());
                 this.currentState.setOutOfBandMembers(memberEvents);
+                this.fullRosterFetched = true;
                 logger.log(`LL: forceLoadMembers got ${memberEvents.length} members for room ${this.roomId}`);
                 const oobMembers = this.currentState
                     .getMembers()
@@ -1267,6 +1277,7 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
      */
     public invalidateLoadedMembers(): void {
         this.membersPromise = undefined;
+        this.fullRosterFetched = false;
         this.currentState.markOutOfBandMembersFailed();
     }
 
@@ -2171,6 +2182,21 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
      * we should encrypt messages for in this room.
      */
     public async getEncryptionTargetMembers(): Promise<RoomMember[]> {
+        // Under sliding sync the constructor pre-resolves membersPromise (correct
+        // for classic non-lazy /sync, which delivers the full roster), but sliding
+        // required_state only carries $LAZY senders — encrypting to that partial
+        // roster under-shares the megolm key and every missing member UTDs. The
+        // joined_count invalidation in sliding-sync-sdk can't be relied on to
+        // catch it (servers under-fill counts), so guarantee one real /members
+        // fetch per session before the first key share. forceLoadMembers caches
+        // into membersPromise, so this costs one request per room per session —
+        // and nothing at all if the client already force-loaded (e.g. on room open).
+        // A fetch failure propagates and fails the send (fail-closed, matching the
+        // classic lazy-load path): a visible send error beats silently encrypting
+        // to a partial roster and UTD-ing the members we couldn't see.
+        if (!this.fullRosterFetched && this.client.getSlidingSync?.()) {
+            await this.forceLoadMembers();
+        }
         await this.loadMembersIfNeeded();
         let members = this.getMembersWithMembership(KnownMembership.Join);
         if (this.shouldEncryptForInvitedMembers()) {

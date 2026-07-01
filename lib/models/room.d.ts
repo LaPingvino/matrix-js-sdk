@@ -245,6 +245,7 @@ export declare class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandle
     private heroes;
     private getTypeWarning;
     private membersPromise?;
+    private fullRosterFetched;
     /**
      * The human-readable display name for this room.
      */
