@@ -27,6 +27,27 @@ export declare abstract class ReadReceipt<Events extends string, Arguments exten
     getReadReceiptForUserId(userId: string, ignoreSynthesized?: boolean, receiptType?: ReceiptType): WrappedReceipt | null;
     private compareReceipts;
     /**
+     * Would SENDING a receipt of `receiptType` for `event` move `userId`'s read
+     * position BACKWARDS (or nowhere)?
+     *
+     * A user's read position must be monotonic — it only moves forward, except
+     * through an explicit mark-unread. The receive side already enforces this
+     * (addReceiptToStructure ignores older receipts), but a client acting on a
+     * stale paint could still SEND a receipt for an event older than the one the
+     * server holds; servers that store receipts last-write-wins then regress the
+     * marker for every device — the classic "messages I read came back as
+     * unread". Callers (sendReceipt / setRoomReadMarkers) skip the send when
+     * this returns true.
+     *
+     * Same-position sends are also reported as regressions so redundant receipt
+     * spam is suppressed (the local echo counts — synthesized receipts are NOT
+     * ignored here on purpose).
+     *
+     * Fail-open: when the existing receipt's event is not loaded and ordering is
+     * unknowable, we allow the send — a fresh login must still be able to read.
+     */
+    wouldRegressReceipt(userId: string, event: MatrixEvent, receiptType: ReceiptType): boolean;
+    /**
      * Get the ID of the event that a given user has read up to, or null if:
      * - we have received no read receipts for them, or
      * - the receipt we have points at an event we don't have, or

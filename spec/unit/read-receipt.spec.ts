@@ -275,6 +275,46 @@ describe("Read receipt", () => {
         });
     });
 
+    describe("wouldRegressReceipt", () => {
+        const userId = "@user:server";
+        let room: Room;
+        let older: MatrixEvent;
+        let newer: MatrixEvent;
+
+        beforeEach(async () => {
+            room = new Room(ROOM_ID, client, userId);
+            // Another user's messages — our OWN messages would synthesize an own-user
+            // receipt at the newest event and shadow the scenarios below.
+            older = utils.mkMessage({ room: ROOM_ID, user: "@other:server", msg: "older", event: true });
+            newer = utils.mkMessage({ room: ROOM_ID, user: "@other:server", msg: "newer", event: true });
+            await room.addLiveEvents([older, newer], { addToState: false });
+        });
+
+        it("allows a send when there is no existing receipt", () => {
+            expect(room.wouldRegressReceipt(userId, newer, ReceiptType.Read)).toBe(false);
+        });
+
+        it("allows a send that advances the read position", () => {
+            room.addReceiptToStructure(older.getId()!, ReceiptType.Read, userId, { ts: 1 }, false);
+            expect(room.wouldRegressReceipt(userId, newer, ReceiptType.Read)).toBe(false);
+        });
+
+        it("blocks a send that would move the read position backwards", () => {
+            room.addReceiptToStructure(newer.getId()!, ReceiptType.Read, userId, { ts: 2 }, false);
+            expect(room.wouldRegressReceipt(userId, older, ReceiptType.Read)).toBe(true);
+        });
+
+        it("blocks a redundant same-position send", () => {
+            room.addReceiptToStructure(newer.getId()!, ReceiptType.Read, userId, { ts: 2 }, false);
+            expect(room.wouldRegressReceipt(userId, newer, ReceiptType.Read)).toBe(true);
+        });
+
+        it("fails open when the existing receipt's event is unknown", () => {
+            room.addReceiptToStructure("$not-loaded", ReceiptType.Read, userId, { ts: 2 }, false);
+            expect(room.wouldRegressReceipt(userId, newer, ReceiptType.Read)).toBe(false);
+        });
+    });
+
     describe("Determining the right thread ID for a receipt", () => {
         it("provides the thread root ID for a normal threaded message", () => {
             const event = utils.mkEvent({

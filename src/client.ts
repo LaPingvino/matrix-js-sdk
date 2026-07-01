@@ -3584,6 +3584,26 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             return Promise.resolve({}); // guests cannot send receipts so don't bother.
         }
 
+        // Monotonic read position: never send a receipt that would move our marker
+        // backwards (or re-send the same position). A stale send poisons the
+        // server-side receipt for EVERY device (last-write-wins servers), which is
+        // how "messages I already read come back as unread" happens. Scoped to the
+        // main timeline — thread receipts have their own ordering domain.
+        const guardRoom = this.getRoom(event.getRoomId());
+        if (
+            guardRoom &&
+            this.credentials.userId &&
+            (unthreaded || threadIdForReceipt(event) === MAIN_ROOM_TIMELINE) &&
+            typeof guardRoom.wouldRegressReceipt === "function" &&
+            guardRoom.wouldRegressReceipt(this.credentials.userId, event, receiptType)
+        ) {
+            this.logger.debug(
+                `sendReceipt: skipping ${receiptType} for ${event.getId()} in ${event.getRoomId()} — ` +
+                    `would not advance the read position`,
+            );
+            return Promise.resolve({});
+        }
+
         const path = utils.encodeUri("/rooms/$roomId/receipt/$receiptType/$eventId", {
             $roomId: event.getRoomId()!,
             $receiptType: receiptType,
@@ -3651,14 +3671,25 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             throw new Error(`Cannot set read marker to a pending event (${rmEventId})`);
         }
 
-        // Add the optional RR update, do local echo like `sendReceipt`
+        // Add the optional RR update, do local echo like `sendReceipt`.
+        // Same monotonic guard as sendReceipt: drop a receipt that would move our
+        // read position backwards (the fully-read marker below still goes out).
         let rrEventId: string | undefined;
         if (rrEvent) {
             rrEventId = rrEvent.getId()!;
             if (room?.hasPendingEvent(rrEventId)) {
                 throw new Error(`Cannot set read receipt to a pending event (${rrEventId})`);
             }
-            room?.addLocalEchoReceipt(this.credentials.userId!, rrEvent, ReceiptType.Read);
+            if (
+                room &&
+                this.credentials.userId &&
+                typeof room.wouldRegressReceipt === "function" &&
+                room.wouldRegressReceipt(this.credentials.userId, rrEvent, ReceiptType.Read)
+            ) {
+                rrEventId = undefined;
+            } else {
+                room?.addLocalEchoReceipt(this.credentials.userId!, rrEvent, ReceiptType.Read);
+            }
         }
 
         // Add the optional private RR update, do local echo like `sendReceipt`
@@ -3668,7 +3699,16 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             if (room?.hasPendingEvent(rpEventId)) {
                 throw new Error(`Cannot set read receipt to a pending event (${rpEventId})`);
             }
-            room?.addLocalEchoReceipt(this.credentials.userId!, rpEvent, ReceiptType.ReadPrivate);
+            if (
+                room &&
+                this.credentials.userId &&
+                typeof room.wouldRegressReceipt === "function" &&
+                room.wouldRegressReceipt(this.credentials.userId, rpEvent, ReceiptType.ReadPrivate)
+            ) {
+                rpEventId = undefined;
+            } else {
+                room?.addLocalEchoReceipt(this.credentials.userId!, rpEvent, ReceiptType.ReadPrivate);
+            }
         }
 
         return await this.setRoomReadMarkersHttpRequest(roomId, rmEventId, rrEventId, rpEventId);
