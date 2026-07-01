@@ -672,10 +672,16 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
     // e2ee's onSyncCompleted triggers the outgoing-request pump (outgoingRequests()).
     // Running them concurrently lets those two calls hit the wasm OlmMachine at the same
     // time, corrupting in-flight state — most visibly an SAS verification that the core
-    // then aborts with a spurious m.mismatched_sas. Sequential iteration follows
-    // registration order (to_device before e2ee = feed-incoming before send-outgoing).
+    // then aborts with a spurious m.mismatched_sas.
+    //
+    // Iterate OUR registration order (to_device before e2ee = feed-incoming before
+    // send-outgoing), NOT the response's key order: Object.keys(ext) follows the
+    // server's JSON serialization, which only happens to match today. This also makes
+    // an extension key we never registered a no-op instead of a TypeError that would
+    // kill the sync loop.
     private async onPreExtensionsResponse(ext: Record<string, object>): Promise<void> {
-        for (const extName of Object.keys(ext)) {
+        for (const extName of Object.keys(this.extensions)) {
+            if (!(extName in ext)) continue;
             if (this.extensions[extName].when() == ExtensionState.PreProcess) {
                 await this.extensions[extName].onResponse(ext[extName]);
             }
@@ -683,7 +689,8 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
     }
 
     private async onPostExtensionsResponse(ext: Record<string, object>): Promise<void> {
-        for (const extName of Object.keys(ext)) {
+        for (const extName of Object.keys(this.extensions)) {
+            if (!(extName in ext)) continue;
             if (this.extensions[extName].when() == ExtensionState.PostProcess) {
                 await this.extensions[extName].onResponse(ext[extName]);
             }
@@ -822,6 +829,7 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
         // which correctly re-arms the dirty-marking.
         let currentPos: string | undefined = this.restorePos();
         let failures = 0;
+        let processingFailures = 0;
         // After a response carries to-device events we're probably mid-handshake
         // (verification / key share), so poll FAST for the next several rounds to
         // keep the multi-step exchange snappy, then relax back to the base timeout
@@ -885,8 +893,13 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
                 }
                 this.pendingReq = this.client.slidingSync(reqBody, this.proxyBaseUrl, this.abortController.signal);
                 resp = await this.pendingReq;
-                currentPos = resp.pos;
-                this.persistPos(currentPos);
+                // NOTE: pos is NOT advanced or persisted here. The server treats the
+                // NEXT request's pos as the ack that deletes delivered to-device
+                // messages (Continuwuity keys the deletion on the request's pos), so
+                // advancing before the response is fully processed makes a crash,
+                // reload, or processing throw in that window LOSE room keys and
+                // device-list deltas permanently. pos moves only after the
+                // processing block below succeeds — redelivery beats loss.
                 failures = 0; // a successful round-trip clears the backoff
                 // update what we think we're subscribed to.
                 for (const roomId of newSubscriptions) {
@@ -945,14 +958,50 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
             if (!resp) {
                 continue;
             }
-            await this.onPreExtensionsResponse(resp.extensions);
+            // Response processing gets its own try/catch: without it, one throw
+            // (a wasm error in receiveSyncChanges, a throwing app listener on a
+            // synchronously-emitted ClientEvent, setPushRules failing) escapes
+            // start() and kills this sync loop permanently, surfacing only as an
+            // info-level "Sync startup aborted" log — rooms freeze (main conn) or
+            // to-device stops forever (encryption conn) until a reload.
+            try {
+                await this.onPreExtensionsResponse(resp.extensions);
 
-            for (const roomId in resp.rooms) {
-                await this.invokeRoomDataListeners(roomId, resp!.rooms[roomId]);
+                for (const roomId in resp.rooms) {
+                    await this.invokeRoomDataListeners(roomId, resp!.rooms[roomId]);
+                }
+
+                this.invokeLifecycleListeners(SlidingSyncState.Complete, resp);
+                await this.onPostExtensionsResponse(resp.extensions);
+                processingFailures = 0;
+                currentPos = resp.pos;
+                this.persistPos(currentPos);
+            } catch (err) {
+                processingFailures += 1;
+                if (processingFailures >= 3) {
+                    // A deterministic processing bug would otherwise redeliver the
+                    // same response forever. Advance past it and log loudly: we
+                    // knowingly drop this batch to keep the loop alive.
+                    logger.error(
+                        `SlidingSync(${this.connId ?? "main"}): response processing failed ${processingFailures}x; ` +
+                            `advancing pos past the poisoned batch`,
+                        err,
+                    );
+                    processingFailures = 0;
+                    currentPos = resp.pos;
+                    this.persistPos(currentPos);
+                } else {
+                    // Keep the old pos: the next request re-fetches this batch from
+                    // the server (its ack is the next request's pos), so a transient
+                    // throw redelivers instead of losing to-device messages.
+                    logger.error(
+                        `SlidingSync(${this.connId ?? "main"}): response processing failed; ` +
+                            `keeping pos for redelivery (attempt ${processingFailures})`,
+                        err,
+                    );
+                    await sleep(1000 * processingFailures);
+                }
             }
-
-            this.invokeLifecycleListeners(SlidingSyncState.Complete, resp);
-            await this.onPostExtensionsResponse(resp.extensions);
         }
     }
 }
