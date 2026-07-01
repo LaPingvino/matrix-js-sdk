@@ -239,6 +239,7 @@ export declare class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, Sli
     private listModifiedCount;
     private terminated;
     private needsResend;
+    private forceReinit;
     private extensions;
     private desiredRoomSubscriptions;
     private confirmedRoomSubscriptions;
@@ -393,6 +394,26 @@ export declare class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, Sli
     private posStorageKey;
     private restorePos;
     private persistPos;
+    /**
+     * Drop the persisted pos so the NEXT start() begins a fresh connection
+     * (since=0 → the server forgets this conn_id's state and re-sends everything
+     * as initial). Callers use this to keep pos and local room persistence
+     * COUPLED: under a stateful connection the server only sends deltas for
+     * rooms it believes we hold, so resuming a pos without the local rooms that
+     * back it (e.g. the boot cache was wiped) would leave those rooms invisible
+     * forever. Must be called before start().
+     */
+    clearPersistedPos(): void;
+    /**
+     * Force a full connection re-initialisation from INSIDE a running loop:
+     * drops pos (client and persisted), re-arms sticky params, and aborts any
+     * in-flight request. The server forgets this conn_id's state on the next
+     * since=0 request and re-sends everything as initial:true — the recovery
+     * path for "the server is sending deltas against state we no longer hold"
+     * (e.g. a delta arrives for a room we don't have). Idempotent; cheap-ish
+     * but resends the world, so callers should rate-limit.
+     */
+    reinitialize(): void;
     /**
      * Re-setup this connection e.g in the event of an expired session.
      */

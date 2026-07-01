@@ -31,6 +31,8 @@ export declare class SlidingSyncSdk {
      * rehydrated-but-not-yet-live room's count must be treated as provisional.
      */
     private readonly liveSyncedRooms;
+    /** Last wall-clock we requested a connection re-init for a delta targeting an unknown room. */
+    private lastUnknownRoomReinit;
     constructor(slidingSync: SlidingSync, client: MatrixClient, opts: IStoredClientOpts | undefined, syncOpts: SyncApiOptions);
     private onRoomData;
     private onLifecycle;

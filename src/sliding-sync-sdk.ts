@@ -63,10 +63,14 @@ import { KnownMembership, type Membership } from "./@types/membership.ts";
 // keepAlive is successful but the server /sync fails.
 const FAILED_SYNC_ERROR_THRESHOLD = 3;
 
-/** Poll timeout for the dedicated encryption sync. Short so to-device/e2ee
- * (verification, key shares, device-list updates) are delivered promptly,
- * independent of the slower room sync. */
-const ENCRYPTION_SYNC_TIMEOUT_MS = 3_000;
+/** Poll timeout for the dedicated encryption sync. The server long-polls on a
+ * per-user watcher and WAKES on new data (to-device, device-list changes, OTK
+ * counts are all watched), so delivery latency is wake-driven, not poll-driven
+ * — a long timeout just cuts idle request volume. The server caps the hang at
+ * 30s. (The old 3s poll dated from the disproven "the server never wakes"
+ * model.) During a to-device handshake the boost mechanism in
+ * {@link SlidingSync#start} still fast-polls as a belt-and-braces. */
+const ENCRYPTION_SYNC_TIMEOUT_MS = 30_000;
 
 /** Name of the lean room subscription used to bulk-materialise DM rooms (just
  * enough state to show them in the list, NOT the heavy opened-room set). */
@@ -362,6 +366,8 @@ export class SlidingSyncSdk {
      * rehydrated-but-not-yet-live room's count must be treated as provisional.
      */
     private readonly liveSyncedRooms = new Set<string>();
+    /** Last wall-clock we requested a connection re-init for a delta targeting an unknown room. */
+    private lastUnknownRoomReinit = 0;
 
     public constructor(
         private readonly slidingSync: SlidingSync,
@@ -421,11 +427,32 @@ export class SlidingSyncSdk {
             let room = this.client.store.getRoom(roomId);
             if (!room) {
                 if (!roomData.initial) {
-                    this.syncOpts.logger.debug(
-                        "initial flag not set but no stored room exists for room ",
-                        roomId,
-                        roomData,
-                    );
+                    // A non-initial response is a DELTA against state the server
+                    // believes we hold (conn_id + resumed pos) — but we don't have
+                    // this room (boot cache evicted/wiped it while the pos
+                    // survived). Ingesting the delta would create a state-degraded
+                    // room (no m.room.create, possibly no m.room.encryption — a
+                    // plaintext-to-E2EE hazard), and dropping it silently would
+                    // leave the room invisible FOREVER (the server never re-sends
+                    // what it thinks we have). The only sound recovery is to start
+                    // the connection over: since=0 makes the server forget this
+                    // conn_id and re-send everything initial:true. Rate-limited so
+                    // a pathological loop can't hammer the server; one re-init
+                    // recreates every room, so it converges after a single pass.
+                    const now = Date.now();
+                    if (now - this.lastUnknownRoomReinit > 5 * 60 * 1000) {
+                        this.lastUnknownRoomReinit = now;
+                        this.syncOpts.logger.warn(
+                            `Received a delta for unknown room ${roomId}; local state is behind the ` +
+                                `connection — reinitialising the sliding-sync connection`,
+                        );
+                        this.slidingSync.reinitialize();
+                    } else {
+                        this.syncOpts.logger.debug(
+                            "delta for unknown room (reinit already requested recently), skipping",
+                            roomId,
+                        );
+                    }
                     return;
                 }
                 room = _createAndReEmitRoom(this.client, roomId, this.opts);
@@ -687,68 +714,86 @@ export class SlidingSyncSdk {
 
         // TODO: handle threaded / beacon events
 
+        // Bucket the received window against what we already hold. Computed
+        // BEFORE any timeline mutation below.
+        const liveTimelineEvents = room.getLiveTimeline().getEvents();
+        const hadEvents = liveTimelineEvents.length > 0;
+        let didReset = false;
         if (roomData.limited || roomData.initial) {
             // we should not know about any of these timeline entries if this is a genuinely new room.
             // If we do, then we've effectively done scrollback (e.g requesting timeline_limit: 1 for
             // this room, then timeline_limit: 50).
             const knownEvents = new Set<string>();
-            room.getLiveTimeline()
-                .getEvents()
-                .forEach((e) => {
-                    knownEvents.add(e.getId()!);
-                });
-            // Unknown events BEFORE the OLDEST known event are scrollback e.g:
-            //       D E   <-- what we know
-            // A B C D E F <-- what we just received
-            // means:
-            // A B C       <-- scrollback
-            //       D E   <-- dupes
-            //           F <-- new event
-            //
-            // The anchor MUST be the oldest known event, not the newest. Under
-            // chronological pendingEventOrdering our own just-sent message is
-            // already in the live timeline with its real id — it is the NEWEST
-            // known event. Anchoring on the newest (as the original upstream
-            // bucketing did) classified every concurrent foreign event ordered
-            // before our echo as "scrollback" and PREPENDED it to the top of the
-            // timeline — invisible until a full reload rebuilt the room. Bridge
-            // bursts right after a send/reaction hit this constantly. Unknown
-            // events between/after known events are treated as live: worst case
-            // they append slightly out of order (the display layers sort), which
-            // beats hiding them at the start of the timeline.
-            // NO overlap at all with what we hold? Then nothing here is provably
-            // scrollback — this is a brand-new room, or a burst that overflowed
-            // the window past everything we know (WhatsApp-bridge bursts do this
-            // constantly). These MUST go through the live path: the scrollback
-            // path (addEventsToTimeline) emits no live Timeline events, so an
-            // open room would silently never update. The gap between our old
-            // tail and this window stays missing until back-pagination — the
-            // known, lesser evil (see the limited-gap item in the conn_id plan).
+            liveTimelineEvents.forEach((e) => {
+                knownEvents.add(e.getId()!);
+            });
             const anyKnown = timelineEvents.some((e) => knownEvents.has(e.getId()!));
-            const oldEvents: MatrixEvent[] = [];
-            const newEvents: MatrixEvent[] = [];
-            let seenKnownEvent = false;
-            for (const recvEvent of timelineEvents) {
-                // oldest -> newest
-                if (knownEvents.has(recvEvent.getId()!)) {
-                    seenKnownEvent = true;
-                    continue; // don't include this event, it's a dupe
+            if (roomData.limited && hadEvents && !anyKnown) {
+                // A LIMITED window sharing NOTHING with what we hold: more events
+                // arrived than the window could carry, and the whole window is
+                // past our tail — a REAL GAP between our newest event and the
+                // window's oldest (bridge bursts, catch-up after offline, re-init
+                // after session expiry). Classic sync's answer, taken verbatim:
+                // reset the live timeline. The window's events then append as
+                // LIVE events on the fresh timeline (visible, notifying), the old
+                // timeline stays reachable, and the gap becomes back-PAGINATABLE
+                // via prev_batch instead of silently unreachable (the pre-conn_id
+                // "lesser evil" was to append gap-events as live and never
+                // deliver the gap at all). Both clients handle the reset:
+                // Wally's RoomTimeline self-heals on RoomEvent.TimelineReset and
+                // WukkieMail re-snaps from getLiveTimeline() every sync.
+                room.resetLiveTimeline(roomData.prev_batch ?? null, null);
+                // A gap means incremental notif tracking is broken; same as sync.ts.
+                this.client.resetNotifTimelineSet();
+                didReset = true;
+            } else {
+                // Unknown events BEFORE the OLDEST known event are scrollback e.g:
+                //       D E   <-- what we know
+                // A B C D E F <-- what we just received
+                // means:
+                // A B C       <-- scrollback
+                //       D E   <-- dupes
+                //           F <-- new event
+                //
+                // The anchor MUST be the oldest known event, not the newest. Under
+                // chronological pendingEventOrdering our own just-sent message is
+                // already in the live timeline with its real id — it is the NEWEST
+                // known event. Anchoring on the newest (as the original upstream
+                // bucketing did) classified every concurrent foreign event ordered
+                // before our echo as "scrollback" and PREPENDED it to the top of the
+                // timeline — invisible until a full reload rebuilt the room. Bridge
+                // bursts right after a send/reaction hit this constantly. Unknown
+                // events between/after known events are treated as live: worst case
+                // they append slightly out of order (the display layers sort), which
+                // beats hiding them at the start of the timeline.
+                // NO overlap at all with what we hold? Then this is a brand-new /
+                // empty room (the gap case above already peeled off limited windows
+                // over a non-empty timeline): everything is live.
+                const oldEvents: MatrixEvent[] = [];
+                const newEvents: MatrixEvent[] = [];
+                let seenKnownEvent = false;
+                for (const recvEvent of timelineEvents) {
+                    // oldest -> newest
+                    if (knownEvents.has(recvEvent.getId()!)) {
+                        seenKnownEvent = true;
+                        continue; // don't include this event, it's a dupe
+                    }
+                    if (seenKnownEvent || !anyKnown) {
+                        // newer than the oldest event we already hold (or no anchor
+                        // at all): live, not scrollback
+                        newEvents.push(recvEvent);
+                    } else {
+                        // older than everything we hold: scrollback.
+                        // unshift => reverse-chronological, the order
+                        // addEventsToTimeline(toStartOfTimeline) expects.
+                        oldEvents.unshift(recvEvent);
+                    }
                 }
-                if (seenKnownEvent || !anyKnown) {
-                    // newer than the oldest event we already hold (or no anchor
-                    // at all): live, not scrollback
-                    newEvents.push(recvEvent);
-                } else {
-                    // older than everything we hold: scrollback.
-                    // unshift => reverse-chronological, the order
-                    // addEventsToTimeline(toStartOfTimeline) expects.
-                    oldEvents.unshift(recvEvent);
+                timelineEvents = newEvents;
+                if (oldEvents.length > 0) {
+                    // old events are scrollback, insert them now
+                    room.addEventsToTimeline(oldEvents, true, false, room.getLiveTimeline(), roomData.prev_batch);
                 }
-            }
-            timelineEvents = newEvents;
-            if (oldEvents.length > 0) {
-                // old events are scrollback, insert them now
-                room.addEventsToTimeline(oldEvents, true, false, room.getLiveTimeline(), roomData.prev_batch);
             }
         }
 
@@ -803,9 +848,15 @@ export class SlidingSyncSdk {
             return;
         }
 
-        if (roomData.limited) {
-            // set the back-pagination token. Do this *before* adding any
-            // events so that clients can start back-paginating.
+        if (roomData.limited && !didReset && !hadEvents) {
+            // First paint of a fresh timeline: set the back-pagination token
+            // *before* adding any events so clients can start back-paginating.
+            // Only then — a reset already set the fresh timeline's token, and
+            // when we HOLD older events the timeline's existing token is the
+            // right deeper-history continuation; overwriting it with this
+            // window's prev_batch (which points just before the window, i.e.
+            // AHEAD of our timeline start) would make back-pagination re-fetch
+            // events we already hold and skip the genuinely older history.
             room.getLiveTimeline().setPaginationToken(roomData.prev_batch ?? null, EventTimeline.BACKWARDS);
         }
 
@@ -1057,15 +1108,15 @@ export class SlidingSyncSdk {
      * the rehydrated timeline rather than duplicating it. Best-effort: any failure
      * leaves us with today's cold start.
      */
-    private async rehydrateFromCache(): Promise<void> {
+    private async rehydrateFromCache(): Promise<number> {
         let rooms: { roomId: string; data: MSC3575RoomData; receipt?: IMinimalEvent; accountData?: IMinimalEvent[] }[];
         try {
             rooms = await this.roomCache.loadAll();
         } catch (e) {
             this.syncOpts.logger.warn("[sss-cache] rehydrate load failed; cold start", e);
-            return;
+            return 0;
         }
-        if (rooms.length === 0) return;
+        if (rooms.length === 0) return 0;
         this.syncOpts.logger.debug(`[sss-cache] rehydrating ${rooms.length} rooms from cache`);
         this.rehydrating = true;
         try {
@@ -1100,6 +1151,7 @@ export class SlidingSyncSdk {
         } finally {
             this.rehydrating = false;
         }
+        return rooms.length;
     }
 
     /**
@@ -1122,7 +1174,19 @@ export class SlidingSyncSdk {
         // round-trip used to gate the cached paint behind it. Strictly sequential:
         // no overlap, no race. Live initial=true responses dedupe against what we
         // replay here; best-effort, never fatal.
-        await this.rehydrateFromCache();
+        const replayed = await this.rehydrateFromCache();
+        if (replayed === 0) {
+            // COUPLING INVARIANT: pos may only be resumed when the boot cache
+            // actually restored the rooms behind it. Under a stateful connection
+            // (conn_id) the server only sends DELTAS for rooms it believes we
+            // hold — resuming a pos with no local rooms (cache wiped, disabled,
+            // quota-evicted, schema-bumped) would leave every quiet room
+            // invisible until it next changed, and busy rooms state-degraded.
+            // Dropping the pos forces since=0: the server forgets the connection
+            // and re-sends everything as initial. On a genuinely fresh login
+            // there is no pos, so this is a no-op.
+            this.slidingSync.clearPersistedPos();
+        }
 
         //   1) We need push rules so we can check if events should bing as we get them
         //      from the LIVE sync. This must complete before the live loop opens (below),

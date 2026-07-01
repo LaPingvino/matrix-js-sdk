@@ -104,9 +104,83 @@ function curate(data: MSC3575RoomData): MSC3575RoomData {
     };
 }
 
+type TimelineEntry = MSC3575RoomData["timeline"][number];
+const eventIdOf = (e: TimelineEntry): string | undefined => (e as { event_id?: string }).event_id;
+
+/**
+ * Merge a room's incoming sliding-sync data into the previously cached record.
+ * Exported for tests.
+ *
+ * Under a stateful connection (conn_id) the server sends sparse DELTAS: a
+ * response for a known room carries only the new timeline events and only the
+ * changed state, and omits fields that didn't change. Persisting such a delta
+ * wholesale (the old behaviour) meant the last delta before shutdown BECAME the
+ * entire cached record — the next boot painted the room as one event with
+ * near-empty state. So we merge instead, per THE ONE RULE's "keep last-known":
+ *
+ * - scalar fields: incoming non-null wins, otherwise keep the cached value;
+ * - required_state: union by (type, state_key), incoming wins;
+ * - timeline: `initial` replaces everything (server re-sent from scratch);
+ *   `limited` replaces the timeline + prev_batch (a limited delta does NOT
+ *   connect to our cached tail — appending would bake an invisible gap into
+ *   the cached record); otherwise the delta is contiguous with our tail, so
+ *   append (deduped) and KEEP the cached prev_batch, which still matches the
+ *   timeline's start. If a contiguous append would overflow {@link MAX_TIMELINE},
+ *   fall back to just the delta window with ITS prev_batch — trimming the head
+ *   of a merged timeline instead would leave prev_batch pointing BEFORE the
+ *   trimmed events, and back-pagination after reload would silently skip them
+ *   (a permanent mid-timeline hole). A thin-but-correct paint beats that.
+ */
+export function mergeRoomData(prev: MSC3575RoomData | undefined, next: MSC3575RoomData): MSC3575RoomData {
+    if (!prev || next.initial) {
+        return curate(next);
+    }
+    // Keep-last-known scalars: only let DEFINED incoming fields overwrite.
+    const overlay: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(next)) {
+        if (v !== undefined && v !== null) overlay[k] = v;
+    }
+    const merged = { ...prev, ...overlay } as MSC3575RoomData;
+
+    // required_state: union by (type, state_key), incoming wins.
+    const state = new Map<string, TimelineEntry>();
+    for (const ev of prev.required_state ?? []) state.set(`${ev.type}|${ev.state_key}`, ev);
+    for (const ev of next.required_state ?? []) state.set(`${ev.type}|${ev.state_key}`, ev);
+    merged.required_state = [...state.values()] as MSC3575RoomData["required_state"];
+
+    const prevTimeline = prev.timeline ?? [];
+    const nextTimeline = next.timeline ?? [];
+    if (next.limited) {
+        // Doesn't connect to our cached tail: replace. prev_batch (if any)
+        // matches the new window's start; an absent one wipes the old token,
+        // which no longer describes this timeline's start either.
+        merged.timeline = nextTimeline;
+        merged.prev_batch = next.prev_batch;
+    } else {
+        const seen = new Set(prevTimeline.map(eventIdOf));
+        const appended = [...prevTimeline, ...nextTimeline.filter((e) => !eventIdOf(e) || !seen.has(eventIdOf(e)))];
+        if (appended.length > MAX_TIMELINE && nextTimeline.length > 0 && next.prev_batch) {
+            merged.timeline = nextTimeline;
+            merged.prev_batch = next.prev_batch;
+        } else {
+            merged.timeline = appended;
+            merged.prev_batch = prev.prev_batch;
+        }
+    }
+    return curate(merged);
+}
+
 export class SlidingSyncCache {
     private dbPromise: Promise<IDBDatabase | null> | null = null;
-    private pending = new Map<string, CachedRoomRecord>();
+    /**
+     * Session store-of-record: the MERGED cached record per room, seeded from
+     * IndexedDB by {@link loadAll} and updated by every {@link put}. Deltas
+     * merge against this synchronously (no IDB read on the put path); flush
+     * writes the dirty subset out. Memory is bounded by the account's room
+     * count, same order as the SDK's own Room store.
+     */
+    private records = new Map<string, CachedRoomRecord>();
+    private dirty = new Set<string>();
     private flushTimer: ReturnType<typeof setTimeout> | null = null;
     private closed = false;
     private readonly dbName: string;
@@ -204,21 +278,29 @@ export class SlidingSyncCache {
                 };
                 cursorReq.onerror = (): void => resolve(out);
             });
-            return records
-                .filter((r) => r && r.schema === SCHEMA_VERSION && r.data && r.roomId)
-                .map((r) => ({
-                    roomId: r.roomId,
-                    data: { ...r.data, initial: true, limited: true },
-                    receipt: r.receipt,
-                    accountData: r.accountData,
-                }));
+            const valid = records.filter((r) => r && r.schema === SCHEMA_VERSION && r.data && r.roomId);
+            // Seed the merge base: subsequent live DELTAS for these rooms merge
+            // against what we just loaded rather than replacing it.
+            for (const r of valid) {
+                if (!this.records.has(r.roomId)) this.records.set(r.roomId, r);
+            }
+            return valid.map((r) => ({
+                roomId: r.roomId,
+                data: { ...r.data, initial: true, limited: true },
+                receipt: r.receipt,
+                accountData: r.accountData,
+            }));
         } catch (e) {
             this.logger.warn("[sss-cache] loadAll failed", e);
             return [];
         }
     }
 
-    /** Queue a room's data for persistence (debounced + coalesced). */
+    /**
+     * Merge a room's data into the session record (deltas merge, initial
+     * replaces — see {@link mergeRoomData}) and queue it for persistence
+     * (debounced + coalesced).
+     */
     public put(
         roomId: string,
         data: MSC3575RoomData,
@@ -227,15 +309,20 @@ export class SlidingSyncCache {
     ): void {
         if (this.closed || !this.idb || cacheDisabled()) return;
         try {
-            this.pending.set(roomId, {
+            const prev = this.records.get(roomId);
+            this.records.set(roomId, {
                 roomId,
-                data: curate(data),
-                receipt,
-                accountData,
+                data: mergeRoomData(prev?.data, data),
+                // receipt/accountData are computed fresh from the Room (already
+                // merged truth) on every put, but keep the last-known copy when
+                // a put omits them.
+                receipt: receipt ?? prev?.receipt,
+                accountData: accountData ?? prev?.accountData,
                 bump: data.bump_stamp ?? Date.now(),
                 ts: Date.now(),
                 schema: SCHEMA_VERSION,
             });
+            this.dirty.add(roomId);
         } catch {
             return;
         }
@@ -244,15 +331,15 @@ export class SlidingSyncCache {
         }
     }
 
-    /** Write all pending records, then evict down to MAX_ROOMS by lowest bump. */
+    /** Write all dirty records, then evict down to MAX_ROOMS by lowest bump. */
     public async flush(): Promise<void> {
         if (this.flushTimer) {
             clearTimeout(this.flushTimer);
             this.flushTimer = null;
         }
-        if (this.pending.size === 0) return;
-        const batch = [...this.pending.values()];
-        this.pending.clear();
+        if (this.dirty.size === 0) return;
+        const batch = [...this.dirty].map((roomId) => this.records.get(roomId)).filter((r): r is CachedRoomRecord => !!r);
+        this.dirty.clear();
         const db = await this.open();
         if (!db) return;
         try {
@@ -305,6 +392,8 @@ export class SlidingSyncCache {
 
     /** Drop the entire cache (used on schema change / reset). */
     public async clear(): Promise<void> {
+        this.records.clear();
+        this.dirty.clear();
         const db = await this.open();
         if (!db) return;
         await new Promise<void>((resolve) => {

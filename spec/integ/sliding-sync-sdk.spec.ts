@@ -42,6 +42,7 @@ import {
     RoomEvent,
     type Room,
     type IRoomTimelineData,
+    EventTimeline,
 } from "../../src";
 import { SlidingSyncSdk } from "../../src/sliding-sync-sdk";
 import { type SyncApiOptions, SyncState } from "../../src/sync";
@@ -79,6 +80,7 @@ describe("SlidingSyncSdk", () => {
         s.start = jest.fn();
         s.stop = jest.fn();
         s.resend = jest.fn();
+        s.reinitialize = jest.fn();
         return s;
     };
 
@@ -374,7 +376,14 @@ describe("SlidingSyncSdk", () => {
             });
 
             it("can be created with live events", async () => {
-                const seenLiveEventDeferred = Promise.withResolvers<boolean>();
+                // Liveness is DERIVED (liveSyncedRooms), never read from the
+                // server's num_live (Continuwuity sends null anyway): a room's
+                // FIRST response this session is a catch-up and paints as
+                // historical — no notification/sound storm on boot — and every
+                // follow-up response's events are live. (This test used to
+                // assert the old model, where num_live marked the first paint's
+                // tail as live.)
+                const liveEventIds: string[] = [];
                 const listener = (
                     ev: MatrixEvent,
                     room?: Room,
@@ -382,22 +391,32 @@ describe("SlidingSyncSdk", () => {
                     deleted?: boolean,
                     timelineData?: IRoomTimelineData,
                 ) => {
-                    if (timelineData?.liveEvent) {
-                        assertTimelineEvents([ev], data[roomH].timeline.slice(-1));
-                        seenLiveEventDeferred.resolve(true);
-                    }
+                    if (timelineData?.liveEvent) liveEventIds.push(ev.getId()!);
                 };
                 client!.on(RoomEvent.Timeline, listener);
                 mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomH, data[roomH]);
                 await emitPromise(client!, ClientEvent.Room);
-                client!.off(RoomEvent.Timeline, listener);
+                // let onRoomData finish marking the room live-synced
+                await new Promise((r) => setTimeout(r, 0));
                 const gotRoom = client!.getRoom(roomH);
                 expect(gotRoom).toBeTruthy();
                 expect(gotRoom!.name).toEqual(data[roomH].name);
                 expect(gotRoom!.getMyMembership()).toEqual(KnownMembership.Join);
                 // check the entire timeline is correct
                 assertTimelineEvents(gotRoom!.getLiveTimeline().getEvents(), data[roomH].timeline);
-                await expect(seenLiveEventDeferred.promise).resolves.toBeTruthy();
+                // nothing in the first paint was live…
+                expect(liveEventIds).toEqual([]);
+                // …but a follow-up response's event is
+                const liveMsg = mkOwnEvent(EventType.RoomMessage, { body: "now live" });
+                mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomH, {
+                    name: data[roomH].name,
+                    required_state: [],
+                    timeline: [liveMsg],
+                });
+                await new Promise((r) => setTimeout(r, 0));
+                client!.off(RoomEvent.Timeline, listener);
+                assertTimelineEvents(gotRoom!.getLiveTimeline().getEvents().slice(-1), [liveMsg]);
+                expect(liveEventIds).toEqual([liveMsg.event_id]);
             });
 
             it("can be created with invite_state", async () => {
@@ -591,12 +610,14 @@ describe("SlidingSyncSdk", () => {
                     expect(got).toEqual([eventD.event_id, eventF.event_id, eventE.event_id]);
                 });
 
-                it("treats a limited window with NO known events as live, not scrollback", async () => {
+                it("resets the live timeline on a limited window with NO known events (a real gap)", async () => {
                     // A bridge burst overflowing the window produces a limited response
-                    // whose events have zero overlap with what we hold. They must go
-                    // through the LIVE path (appended, Timeline events emitted) — the
-                    // scrollback path would prepend them silently and an open room
-                    // would never update until reload.
+                    // whose events have zero overlap with what we hold: there is a GAP
+                    // between our tail and the window that the server will never
+                    // re-send. The room must reset its live timeline (classic sync's
+                    // answer): the burst events land as LIVE events on the fresh
+                    // timeline (visible, notifying — never silently prepended) and the
+                    // gap becomes back-paginatable via the window's prev_batch.
                     const roomId = "!z_burst_gap:localhost";
                     const eventOld = mkOwnEvent(EventType.RoomMessage, { body: "before the burst" });
                     const burst1 = mkOwnEvent(EventType.RoomMessage, { body: "burst 1" });
@@ -612,6 +633,18 @@ describe("SlidingSyncSdk", () => {
                         initial: true,
                     });
                     await emitPromise(client!, ClientEvent.Room);
+                    // Let the first onRoomData fully finish (it marks the room
+                    // live-synced AFTER processing) so the burst counts as live.
+                    await new Promise((r) => setTimeout(r, 0));
+                    const room = client!.getRoom(roomId)!;
+                    let resets = 0;
+                    room.on(RoomEvent.TimelineReset, () => {
+                        resets++;
+                    });
+                    const liveEventIds: string[] = [];
+                    room.on(RoomEvent.Timeline, (ev, _room, _toStart, _removed, timelineData: IRoomTimelineData) => {
+                        if (timelineData.liveEvent) liveEventIds.push(ev.getId()!);
+                    });
                     // The burst: limited, and nothing in the window overlaps eventOld.
                     mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomId, {
                         name: "Z2",
@@ -621,14 +654,77 @@ describe("SlidingSyncSdk", () => {
                         prev_batch: "burst-batch-token",
                     });
                     await new Promise((r) => setTimeout(r, 0));
-                    const got = client!
-                        .getRoom(roomId)!
-                        .getLiveTimeline()
+                    expect(resets).toEqual(1);
+                    const liveTimeline = room.getLiveTimeline();
+                    const got = liveTimeline
                         .getEvents()
                         .filter((e) => e.getType() === EventType.RoomMessage)
                         .map((e) => e.getId());
-                    // Burst events APPENDED after what we had, never prepended before it.
-                    expect(got).toEqual([eventOld.event_id, burst1.event_id, burst2.event_id]);
+                    // The fresh timeline holds exactly the burst, as LIVE events…
+                    expect(got).toEqual([burst1.event_id, burst2.event_id]);
+                    expect(liveEventIds).toEqual([burst1.event_id, burst2.event_id]);
+                    // …and the gap (incl. eventOld) is reachable by back-pagination.
+                    expect(liveTimeline.getPaginationToken(EventTimeline.BACKWARDS)).toEqual("burst-batch-token");
+                });
+
+                it("does not reset nor clobber the pagination token on a limited window that overlaps", async () => {
+                    // An overlapping limited window is contiguous with what we hold:
+                    // no gap, so no reset — and the live timeline's existing backwards
+                    // token must survive (this window's prev_batch points AHEAD of our
+                    // timeline start; overwriting would skip the older history).
+                    const roomId = "!z_overlap_keep:localhost";
+                    const eventD = mkOwnEvent(EventType.RoomMessage, { body: "held" });
+                    const eventE = mkOwnEvent(EventType.RoomMessage, { body: "fresh" });
+                    mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomId, {
+                        name: "Z3",
+                        required_state: [
+                            mkOwnStateEvent(EventType.RoomCreate, {}, ""),
+                            mkOwnStateEvent(EventType.RoomMember, { membership: KnownMembership.Join }, selfUserId),
+                        ],
+                        timeline: [eventD],
+                        initial: true,
+                        limited: true,
+                        prev_batch: "deep-history-token",
+                    });
+                    await emitPromise(client!, ClientEvent.Room);
+                    const room = client!.getRoom(roomId)!;
+                    let resets = 0;
+                    room.on(RoomEvent.TimelineReset, () => {
+                        resets++;
+                    });
+                    mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomId, {
+                        name: "Z3",
+                        required_state: [],
+                        timeline: [eventD, eventE],
+                        limited: true,
+                        prev_batch: "mid-window-token",
+                    });
+                    await new Promise((r) => setTimeout(r, 0));
+                    expect(resets).toEqual(0);
+                    const liveTimeline = room.getLiveTimeline();
+                    const got = liveTimeline
+                        .getEvents()
+                        .filter((e) => e.getType() === EventType.RoomMessage)
+                        .map((e) => e.getId());
+                    expect(got).toEqual([eventD.event_id, eventE.event_id]);
+                    expect(liveTimeline.getPaginationToken(EventTimeline.BACKWARDS)).toEqual("deep-history-token");
+                });
+
+                it("reinitialises the connection when a delta arrives for an unknown room", async () => {
+                    // A non-initial response is a delta against state the server thinks
+                    // we hold. If we don't have the room (boot cache lost it while the
+                    // pos survived), dropping the delta would leave the room invisible
+                    // forever — the SDK must start the connection over (since=0).
+                    (mockSlidingSync!.reinitialize as jest.Mock).mockClear();
+                    mockSlidingSync!.emit(SlidingSyncEvent.RoomData, "!never_seen:localhost", {
+                        name: "Ghost",
+                        required_state: [],
+                        timeline: [mkOwnEvent(EventType.RoomMessage, { body: "delta for a room we lost" })],
+                        // no initial flag: a delta
+                    });
+                    await new Promise((r) => setTimeout(r, 0));
+                    expect(mockSlidingSync!.reinitialize).toHaveBeenCalled();
+                    expect(client!.getRoom("!never_seen:localhost")).toBeNull();
                 });
             });
         });

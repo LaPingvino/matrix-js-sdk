@@ -386,6 +386,8 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
     private terminated = false;
     // flag set when resend() is called because we cannot rely on detecting AbortError in JS SDK :(
     private needsResend = false;
+    // Set by reinitialize(): the next loop iteration drops pos and re-inits the connection.
+    private forceReinit = false;
     // map of extension name to req/resp handler
     private extensions: Record<string, Extension<any, any>> = {};
 
@@ -475,12 +477,40 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
             timeline_limit: opts.roomSubscriptionTimelineLimit ?? 50,
             required_state: subscriptionRequiredState,
         };
-        // 3s, not the classic 30s: Continuwuity holds the long-poll for the full
-        // timeout instead of waking on a new event, so the timeout directly bounds
-        // how long a just-received message / sent-echo takes to appear. Short poll
-        // = snappy live updates (at the cost of more request volume) until the
-        // server learns to wake on data. The initial request still uses timeout=0.
-        const ss = new SlidingSync(client.baseUrl, lists, roomSubscription, client, opts.timeoutMS ?? 3_000);
+        // conn_id makes the connection STATEFUL server-side: Continuwuity keeps
+        // known_rooms per (user, device, conn_id), so responses become sparse
+        // deltas instead of a full-window recompute/resend every cycle (without a
+        // conn_id the server tracked nothing — every room came back initial:true
+        // with the full timeline window, every response, and the connection could
+        // never long-poll because a response was never empty; THAT recompute was
+        // the multi-second update latency). The id must be UNIQUE PER TAB:
+        // known_rooms is shared per (user, device, conn_id), so two tabs on one
+        // conn_id would advance each other's delta baseline and silently starve
+        // each other of room data. A sessionStorage-sticky suffix survives reload
+        // (so the persisted pos can resume) while staying distinct per tab. Note
+        // browsers CLONE sessionStorage on tab-duplicate; that degrades to the
+        // shared-conn churn above until one tab is closed — accepted, rare.
+        // Non-browser environments (node, tests) fall back to plain "main".
+        let connId = "main";
+        try {
+            const KEY = "mxjssdk_sss_tab_id";
+            let tabId = globalThis.sessionStorage?.getItem(KEY);
+            if (globalThis.sessionStorage && !tabId) {
+                tabId = Math.random().toString(36).slice(2, 10);
+                globalThis.sessionStorage.setItem(KEY, tabId);
+            }
+            if (tabId) connId = `main.${tabId}`;
+        } catch {
+            // blocked storage — a fixed conn id still beats none
+        }
+        // 30s long-poll (server hard-caps at 30s): with per-connection state an
+        // idle response is genuinely empty, so the server hangs on its per-user
+        // watcher and WAKES on new data (PDUs, receipts, typing, account data,
+        // to-device — all covered), returning immediately. Latency is wake-driven,
+        // not poll-driven, so a long timeout just cuts request volume. (The old
+        // 3s poll was a workaround for the stateless full-recompute era.) The
+        // initial request still uses timeout=0.
+        const ss = new SlidingSync(client.baseUrl, lists, roomSubscription, client, opts.timeoutMS ?? 30_000, connId);
         // Grow each list's window to cover EVERY room the server reports for that
         // list, so consumers that want "all rooms" / "all spaces" reliably get
         // them without managing ranges. The spaces list needs this too: on a
@@ -802,6 +832,33 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
     }
 
     /**
+     * Drop the persisted pos so the NEXT start() begins a fresh connection
+     * (since=0 → the server forgets this conn_id's state and re-sends everything
+     * as initial). Callers use this to keep pos and local room persistence
+     * COUPLED: under a stateful connection the server only sends deltas for
+     * rooms it believes we hold, so resuming a pos without the local rooms that
+     * back it (e.g. the boot cache was wiped) would leave those rooms invisible
+     * forever. Must be called before start().
+     */
+    public clearPersistedPos(): void {
+        this.persistPos(undefined);
+    }
+
+    /**
+     * Force a full connection re-initialisation from INSIDE a running loop:
+     * drops pos (client and persisted), re-arms sticky params, and aborts any
+     * in-flight request. The server forgets this conn_id's state on the next
+     * since=0 request and re-sends everything as initial:true — the recovery
+     * path for "the server is sending deltas against state we no longer hold"
+     * (e.g. a delta arrives for a room we don't have). Idempotent; cheap-ish
+     * but resends the world, so callers should rate-limit.
+     */
+    public reinitialize(): void {
+        this.forceReinit = true;
+        this.resend();
+    }
+
+    /**
      * Re-setup this connection e.g in the event of an expired session.
      */
     private resetup(): void {
@@ -828,6 +885,19 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
         // connection the first request 400s and we reset to undefined below,
         // which correctly re-arms the dirty-marking.
         let currentPos: string | undefined = this.restorePos();
+        // One-time hygiene: before per-tab conn ids the pos lived under a plain
+        // "main" key; it can never be resumed again (its conn_id changed), so it
+        // would sit in localStorage forever. Safe to drop even if some other tab
+        // still ran the old code — that tab re-inits, which is always sound.
+        if (this.connId?.startsWith("main.")) {
+            try {
+                const userId = this.client.getUserId() ?? "@unknown:unknown";
+                const deviceId = this.client.getDeviceId() ?? "nodevice";
+                localStorage?.removeItem(`mxjssdk_sss_pos_${userId}_${deviceId}_main`);
+            } catch {
+                // hygiene only
+            }
+        }
         let failures = 0;
         let processingFailures = 0;
         // After a response carries to-device events we're probably mid-handshake
@@ -847,6 +917,17 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
         const BOOST_ROUNDS = 12;
         while (!this.terminated) {
             this.needsResend = false;
+            if (this.forceReinit) {
+                // Requested via reinitialize(): start the connection over. The
+                // since=0 request makes the server forget this conn_id's state
+                // and re-send everything initial:true; re-arm our sticky params
+                // (lists + subscriptions) to match the fresh connection.
+                this.forceReinit = false;
+                currentPos = undefined;
+                this.persistPos(undefined);
+                this.lists.forEach((l) => l.setModified(true));
+                this.confirmedRoomSubscriptions = new Set<string>();
+            }
             let resp: MSC3575SlidingSyncResponse | undefined;
             try {
                 const reqLists: Record<string, MSC3575List> = {};
