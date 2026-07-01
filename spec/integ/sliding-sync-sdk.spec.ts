@@ -539,6 +539,57 @@ describe("SlidingSyncSdk", () => {
                     // we expect the timeline now to be oldTimeline (so the old events are in fact old)
                     assertTimelineEvents(gotRoom!.getLiveTimeline().getEvents(), oldTimeline);
                 });
+
+                it("does not misclassify gap events as scrollback when a newer event is already known", async () => {
+                    // Regression: under chronological pendingEventOrdering our own send
+                    // echo is in the live timeline (real id) before the sliding stream
+                    // delivers it. The old bucketing anchored scrollback on the NEWEST
+                    // known event, so a concurrent foreign event ordered before our echo
+                    // was prepended to the top of the timeline — invisible. It must be
+                    // treated as live instead.
+                    const roomId = "!z_echo_hole:localhost";
+                    const eventD = mkOwnEvent(EventType.RoomMessage, { body: "older history" });
+                    const eventE = mkOwnEvent(EventType.RoomMessage, { body: "concurrent foreign message" });
+                    const eventF = mkOwnEvent(EventType.RoomMessage, { body: "our send echo" });
+                    mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomId, {
+                        name: "Z",
+                        required_state: [
+                            mkOwnStateEvent(EventType.RoomCreate, {}, ""),
+                            mkOwnStateEvent(EventType.RoomMember, { membership: KnownMembership.Join }, selfUserId),
+                            mkOwnStateEvent(EventType.RoomPowerLevels, { users: { [selfUserId]: 100 } }, ""),
+                        ],
+                        timeline: [eventD],
+                        initial: true,
+                    });
+                    // Room creation is async for a NEW room — wait for it to be stored.
+                    await emitPromise(client!, ClientEvent.Room);
+                    // F reaches the live timeline ahead of the stream (send echo).
+                    mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomId, {
+                        name: "Z",
+                        required_state: [],
+                        timeline: [eventF],
+                    });
+                    await new Promise((r) => setTimeout(r, 0));
+                    // A limited response replays the window: D (known), E (missed), F (known).
+                    mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomId, {
+                        name: "Z",
+                        required_state: [],
+                        timeline: [eventD, eventE, eventF],
+                        limited: true,
+                        prev_batch: "batch-token",
+                    });
+                    await new Promise((r) => setTimeout(r, 0));
+                    const gotRoom = client!.getRoom(roomId);
+                    expect(gotRoom).toBeTruthy();
+                    const got = gotRoom!
+                        .getLiveTimeline()
+                        .getEvents()
+                        .filter((e) => e.getType() === EventType.RoomMessage)
+                        .map((e) => e.getId());
+                    // E is appended live (slightly out of order beats hidden-at-the-top);
+                    // it must NOT be at the start of the timeline.
+                    expect(got).toEqual([eventD.event_id, eventF.event_id, eventE.event_id]);
+                });
             });
         });
     });

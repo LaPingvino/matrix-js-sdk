@@ -697,29 +697,42 @@ export class SlidingSyncSdk {
                 .forEach((e) => {
                     knownEvents.add(e.getId()!);
                 });
-            // all unknown events BEFORE a known event must be scrollback e.g:
+            // Unknown events BEFORE the OLDEST known event are scrollback e.g:
             //       D E   <-- what we know
             // A B C D E F <-- what we just received
             // means:
             // A B C       <-- scrollback
             //       D E   <-- dupes
             //           F <-- new event
-            // We bucket events based on if we have seen a known event yet.
+            //
+            // The anchor MUST be the oldest known event, not the newest. Under
+            // chronological pendingEventOrdering our own just-sent message is
+            // already in the live timeline with its real id — it is the NEWEST
+            // known event. Anchoring on the newest (as the original upstream
+            // bucketing did) classified every concurrent foreign event ordered
+            // before our echo as "scrollback" and PREPENDED it to the top of the
+            // timeline — invisible until a full reload rebuilt the room. Bridge
+            // bursts right after a send/reaction hit this constantly. Unknown
+            // events between/after known events are treated as live: worst case
+            // they append slightly out of order (the display layers sort), which
+            // beats hiding them at the start of the timeline.
             const oldEvents: MatrixEvent[] = [];
             const newEvents: MatrixEvent[] = [];
             let seenKnownEvent = false;
-            for (let i = timelineEvents.length - 1; i >= 0; i--) {
-                const recvEvent = timelineEvents[i];
+            for (const recvEvent of timelineEvents) {
+                // oldest -> newest
                 if (knownEvents.has(recvEvent.getId()!)) {
                     seenKnownEvent = true;
                     continue; // don't include this event, it's a dupe
                 }
                 if (seenKnownEvent) {
-                    // old -> new
-                    oldEvents.push(recvEvent);
+                    // newer than the oldest event we already hold: live, not scrollback
+                    newEvents.push(recvEvent);
                 } else {
-                    // old -> new
-                    newEvents.unshift(recvEvent);
+                    // older than everything we hold: scrollback.
+                    // unshift => reverse-chronological, the order
+                    // addEventsToTimeline(toStartOfTimeline) expects.
+                    oldEvents.unshift(recvEvent);
                 }
             }
             timelineEvents = newEvents;
