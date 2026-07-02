@@ -3761,10 +3761,22 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             {
                 prefix: MediaPrefix.V3,
                 priority: "low",
+                // Previews are strictly background work with no default timeout. A homeserver (or
+                // preview shim) that accepts the connection but never responds would otherwise hang
+                // the promise forever — wedging the client's fixed pool of preview slots and leaving
+                // the card stuck on its spinner. Bound it so the request always settles.
+                localTimeoutMs: 20000,
             },
         );
         // TODO: Expire the URL preview cache sometimes
         this.urlPreviewCache[key] = resp;
+        // Don't let a rejected request (timeout, network error, 5xx) poison the cache permanently:
+        // we key on url+ts, so without eviction that URL could never be previewed again this session.
+        resp.catch(() => {
+            if (this.urlPreviewCache[key] === resp) {
+                delete this.urlPreviewCache[key];
+            }
+        });
         return resp;
     }
 
