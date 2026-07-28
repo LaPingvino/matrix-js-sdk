@@ -332,6 +332,14 @@ export const DEFAULT_SLIDING_SYNC_REQUIRED_STATE: string[][] = [
     ["m.room.topic", ""],
     ["m.room.canonical_alias", ""],
     ["m.room.encryption", ""],
+    // A dead room must be KNOWN to be dead everywhere it can be shown, not just
+    // once you open it: the list needs it to mark/skip the room, the room view
+    // needs it to swap the composer for the "join the replacement" banner, and
+    // alias resolution needs it to avoid resolving an alias to the OLD room.
+    // Without it here, the tombstone only ever reached a client that happened to
+    // be running at the moment of the upgrade (state event lands in the timeline)
+    // and vanished again on the next reload. One tiny state event per room.
+    ["m.room.tombstone", ""],
     ["m.room.member", MSC3575_STATE_KEY_ME],
     ["m.room.member", MSC3575_STATE_KEY_LAZY],
     ["io.element.functional_members", ""], // bridge-bot list, so DM names exclude bots
@@ -372,6 +380,19 @@ export const DEFAULT_SLIDING_SYNC_SPACES_REQUIRED_STATE: string[][] = [
     ["m.room.power_levels", ""],
     ["im.vector.modular.widgets", MSC3575_WILDCARD],
     ["im.ponies.room_emotes", MSC3575_WILDCARD],
+    // Everything below is READ by the consumers when a room is open and was
+    // simply never requested — so the feature silently did nothing under sliding
+    // sync while working fine under classic /sync (which sends all state).
+    // Audited against every getStateEvent/useStateEvent call site in Wally and
+    // WukkieMail; a read with no matching entry here is a dead feature.
+    ["m.room.pinned_events", ""], // pinned-message bar in BOTH clients
+    ["m.room.join_rules", ""], // room/space settings + "who can join" summary
+    ["m.room.history_visibility", ""], // room settings + local room summary
+    ["m.room.server_acl", ""], // /myacl-style moderation commands + permissions UI
+    ["in.cinny.room.power_level_tags", ""], // role labels in member list / permissions
+    ["eu.kiefte.wally.conference", ""], // Wally Conference room marker
+    ["eu.kiefte.wally.breakout", MSC3575_WILDCARD], // breakout rooms (one event per breakout)
+    ["eu.kiefte.wally.call_room", ""], // WukkieMail's video-room marker (call affordance)
 ];
 
 /**
