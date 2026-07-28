@@ -837,6 +837,26 @@ export class SlidingSyncSdk {
         if (roomData.invite_state) {
             const inviteStateEvents = mapEvents(this.client, room.roomId, roomData.invite_state);
             await this.injectRoomEvents(room, inviteStateEvents);
+            // THE SERVER SENDING invite_state IS ITSELF THE STATEMENT "you are invited
+            // here" — derive membership from that, don't re-derive it from the stripped
+            // state's contents. Room.updateMyMembership is otherwise driven purely by an
+            // m.room.member event with OUR user id in currentState, and stripped state is
+            // exactly where servers disagree: Synapse reliably includes the invitee's own
+            // member event, other implementations may send only the inviter's, omit the
+            // state_key, or send a near-empty invite_state. Every one of those produced an
+            // INVISIBLE invite — a room in the store that no consumer could see, because
+            // membership stayed at whatever it was (usually undefined).
+            //
+            // A self member event is still authoritative when it says something MORE
+            // specific than "invite" (a leave/ban that raced ahead of us), so it wins when
+            // present and valid.
+            const inviteSelfId = this.client.getUserId();
+            const inviteSelfMember = inviteSelfId
+                ? room.currentState.getStateEvents(EventType.RoomMember, inviteSelfId)
+                : null;
+            const strippedMembership = (inviteSelfMember?.getContent() as { membership?: string } | undefined)
+                ?.membership;
+            room.updateMyMembership((strippedMembership as Membership) ?? KnownMembership.Invite);
             if (roomData.initial && newToStore) {
                 room.recalculate();
                 this.client.store.storeRoom(room);
