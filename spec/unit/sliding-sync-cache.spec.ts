@@ -14,7 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { mergeRoomData } from "../../src/sliding-sync-cache";
+import {
+    type CachedRoomRecord,
+    isSpaceData,
+    mergeRoomData,
+    planPrune,
+    shellRecord,
+} from "../../src/sliding-sync-cache";
 import { type MSC3575RoomData } from "../../src/sliding-sync";
 import { type IRoomEvent, type IStateEvent } from "../../src";
 
@@ -112,5 +118,129 @@ describe("SlidingSyncCache mergeRoomData", () => {
         const merged = mergeRoomData(prev, mkData({ timeline: fresh, prev_batch: "fresh-tok" }));
         expect(merged.timeline).toEqual(fresh);
         expect(merged.prev_batch).toEqual("fresh-tok");
+    });
+});
+
+describe("SlidingSyncCache planPrune", () => {
+    const MAX_ROOMS = 512;
+    const MAX_RECORDS = 8192;
+
+    const mkRec = (
+        roomId: string,
+        { bump = 1, events = 1, pin = false }: { bump?: number; events?: number; pin?: boolean } = {},
+    ): CachedRoomRecord =>
+        ({
+            roomId,
+            data: {
+                name: roomId,
+                required_state: [],
+                timeline: Array.from({ length: events }, (_, i) => ({
+                    type: "m.room.message",
+                    content: { body: `e${i}` },
+                    sender: "@alice:localhost",
+                    origin_server_ts: i,
+                    event_id: `$${roomId}-${i}`,
+                })),
+            },
+            bump,
+            ts: 0,
+            schema: 2,
+            ...(pin ? { pin: 1 as const } : {}),
+        }) as CachedRoomRecord;
+
+    const mkMany = (n: number, opts?: Parameters<typeof mkRec>[1]): CachedRoomRecord[] =>
+        Array.from({ length: n }, (_, i) => mkRec(`!r${i}`, { bump: i + 1, ...opts }));
+
+    it("does nothing while under both caps", () => {
+        expect(planPrune(mkMany(MAX_ROOMS))).toEqual({ shell: [], drop: [] });
+    });
+
+    it("shells the least recently active rooms past the room cap, and never deletes them", () => {
+        const plan = planPrune(mkMany(MAX_ROOMS + 3));
+        // bump ascending → the three oldest
+        expect(plan.shell).toEqual(["!r0", "!r1", "!r2"]);
+        expect(plan.drop).toEqual([]);
+    });
+
+    it("exempts pinned records (spaces) from shelling, even as the quietest rooms", () => {
+        const records = [
+            ...mkMany(MAX_ROOMS, { bump: 1000 }),
+            mkRec("!space", { bump: 0, events: 0, pin: true }),
+            mkRec("!quiet", { bump: 1 }),
+        ];
+        const plan = planPrune(records);
+        expect(plan.shell).toContain("!quiet");
+        expect(plan.shell).not.toContain("!space");
+        expect(plan.drop).not.toContain("!space");
+    });
+
+    it("does not re-shell records that are already shells", () => {
+        // Every room over the cap is already a shell → nothing left to free.
+        const records = [...mkMany(MAX_ROOMS, { events: 1 }), ...mkMany(50, { events: 0 })];
+        expect(planPrune(records).shell).toEqual([]);
+    });
+
+    it("deletes only past the hard record cap, oldest shells first", () => {
+        const records = [
+            ...mkMany(MAX_ROOMS, { bump: 10_000, events: 1 }),
+            ...Array.from({ length: MAX_RECORDS - MAX_ROOMS + 2 }, (_, i) =>
+                mkRec(`!s${i}`, { bump: i + 1, events: 0 }),
+            ),
+        ];
+        const plan = planPrune(records);
+        expect(plan.drop).toEqual(["!s0", "!s1"]);
+    });
+
+    it("never both shells and deletes the same record", () => {
+        const records = [
+            ...mkMany(MAX_ROOMS + 1, { bump: 10_000, events: 1 }),
+            ...Array.from({ length: MAX_RECORDS - MAX_ROOMS }, (_, i) => mkRec(`!s${i}`, { bump: 5, events: 0 })),
+        ];
+        const plan = planPrune(records);
+        expect(plan.shell.filter((id) => plan.drop.includes(id))).toEqual([]);
+    });
+});
+
+describe("SlidingSyncCache shellRecord / isSpaceData", () => {
+    const rec = {
+        roomId: "!r",
+        data: {
+            name: "Room",
+            required_state: [{ type: "m.room.create", state_key: "", content: {} }],
+            timeline: [{ type: "m.room.message", content: { body: "hi" }, event_id: "$1" }],
+            prev_batch: "tok",
+            bump_stamp: 7,
+        },
+        bump: 7,
+        ts: 0,
+        schema: 2,
+    } as unknown as CachedRoomRecord;
+
+    it("keeps identity and state, drops the timeline", () => {
+        const shelled = shellRecord(rec);
+        expect(shelled.roomId).toEqual("!r");
+        expect(shelled.data.name).toEqual("Room");
+        expect(shelled.data.required_state).toEqual(rec.data.required_state);
+        expect(shelled.data.timeline).toEqual([]);
+        expect(shelled.bump).toEqual(7);
+    });
+
+    it("drops prev_batch with the timeline, so back-pagination can't skip the discarded events", () => {
+        expect(shellRecord(rec).data.prev_batch).toBeUndefined();
+    });
+
+    it("marks the shell limited, so a live delta replaces rather than appends to nothing", () => {
+        expect(shellRecord(rec).data.limited).toBe(true);
+    });
+
+    it("detects a space from its create event, and only a space", () => {
+        const mk = (content: object): MSC3575RoomData =>
+            ({
+                required_state: [{ type: "m.room.create", state_key: "", content }],
+                timeline: [],
+            }) as unknown as MSC3575RoomData;
+        expect(isSpaceData(mk({ type: "m.space" }))).toBe(true);
+        expect(isSpaceData(mk({}))).toBe(false);
+        expect(isSpaceData({ required_state: [], timeline: [] } as unknown as MSC3575RoomData)).toBe(false);
     });
 });

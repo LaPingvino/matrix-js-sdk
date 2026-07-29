@@ -1195,17 +1195,26 @@ export class SlidingSyncSdk {
         // no overlap, no race. Live initial=true responses dedupe against what we
         // replay here; best-effort, never fatal.
         const replayed = await this.rehydrateFromCache();
-        if (replayed === 0) {
-            // COUPLING INVARIANT: pos may only be resumed when the boot cache
-            // actually restored the rooms behind it. Under a stateful connection
-            // (conn_id) the server only sends DELTAS for rooms it believes we
-            // hold — resuming a pos with no local rooms (cache wiped, disabled,
-            // quota-evicted, schema-bumped) would leave every quiet room
-            // invisible until it next changed, and busy rooms state-degraded.
-            // Dropping the pos forces since=0: the server forgets the connection
-            // and re-sends everything as initial. On a genuinely fresh login
-            // there is no pos, so this is a no-op.
+        // COUPLING INVARIANT: pos may only be resumed when the boot cache
+        // actually restored the rooms behind it. Under a stateful connection
+        // (conn_id) the server only sends DELTAS for rooms it believes we
+        // hold — resuming a pos with rooms missing locally leaves them
+        // invisible until something forces a reinitialise, because the server
+        // never re-sends what it thinks we have. Dropping the pos forces
+        // since=0: the server forgets the connection and re-sends everything as
+        // initial. On a genuinely fresh login there is no pos, so it's a no-op.
+        //
+        // Two ways the invariant can break, and we must check BOTH — the
+        // `replayed === 0` test alone only catches the total loss (cache wiped,
+        // disabled, schema-bumped). A PARTIAL loss reads as a healthy boot:
+        // hundreds of rooms replay, the pos resumes, and the handful the cache
+        // dropped are silently absent. That was a routine occurrence while the
+        // cap deleted records; now that over-cap rooms are shelled rather than
+        // deleted (see SlidingSyncCache.prune), a genuine deletion is rare —
+        // and this makes it cost one resync instead of missing rooms.
+        if (replayed === 0 || this.roomCache.droppedRecords) {
             this.slidingSync.clearPersistedPos();
+            await this.roomCache.clearDropped();
         }
 
         //   1) We need push rules so we can check if events should bing as we get them

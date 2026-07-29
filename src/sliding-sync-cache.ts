@@ -37,9 +37,12 @@ import { type Logger } from "./logger.ts";
  *
  * It is deliberately SMALL and bounded (a curated slice, not the unbounded
  * accumulator that drove some devices over the IndexedDB quota): timelines are
- * capped and the least-recently-active rooms are evicted. Anything goes wrong —
- * absent IndexedDB, corruption, quota — and we silently fall back to today's cold
- * start; the cache is a pure accelerator, never load-bearing.
+ * capped, and past {@link MAX_ROOMS} the least-recently-active rooms have their
+ * timelines dropped while the room itself is KEPT (see {@link shellRecord}) —
+ * because the quota is spent on timelines, while it is the state that makes a
+ * room visible at all. Anything goes wrong — absent IndexedDB, corruption,
+ * quota — and we silently fall back to today's cold start; the cache is a pure
+ * accelerator, never load-bearing.
  *
  * Kill switch: set `localStorage['mxjssdk_sss_cache_disable'] = '1'`.
  */
@@ -51,12 +54,22 @@ const STORE = "rooms";
 const META_STORE = "meta";
 /** Cap timeline events per room. Subscriptions deliver at most 50; this is a safety ceiling. */
 const MAX_TIMELINE = 100;
-/** Cap total cached rooms; the lowest-bump (least recently active) are evicted past this. */
+/**
+ * Cap rooms cached WITH a timeline. Past this, the least recently active are
+ * SHELLED (timeline dropped, state kept) — not deleted. See {@link prune}.
+ */
 const MAX_ROOMS = 512;
+/**
+ * Hard ceiling on total records, shells included. A shell is state-only and
+ * small, so this sits far above any real account; past it we genuinely delete,
+ * which is the one path that can desynchronise us from a resumed pos (see
+ * {@link droppedRecords}).
+ */
+const MAX_RECORDS = 8192;
 /** Coalesce a burst of room updates into one transaction. */
 const FLUSH_DEBOUNCE_MS = 1500;
 
-interface CachedRoomRecord {
+export interface CachedRoomRecord {
     roomId: string;
     /** Curated MSC3575RoomData (timeline capped). */
     data: MSC3575RoomData;
@@ -81,9 +94,91 @@ interface CachedRoomRecord {
     accountData?: IMinimalEvent[];
     /** Sort key for eviction + replay order (recency). */
     bump: number;
+    /**
+     * Never shell, never delete, replay FIRST. Set for spaces.
+     *
+     * A space is pure structure: no timeline (the spaces list runs
+     * `timeline_limit: 0`), so nothing ever bumps it and recency-ordered
+     * eviction sorts it straight to the front of the queue — the cache would
+     * discard the sidebar to keep the chatter. They are also few and tiny, so
+     * pinning them costs nothing. Kept separate from `bump` so that field keeps
+     * meaning "recency" and nothing else.
+     */
+    pin?: 1;
     /** Wall-clock of last write, for tie-breaking / diagnostics. */
     ts: number;
     schema: number;
+}
+
+/** Does this room's cached state say it is a space? */
+export function isSpaceData(data: MSC3575RoomData): boolean {
+    return (data.required_state ?? []).some(
+        (e) =>
+            e.type === "m.room.create" &&
+            e.state_key === "" &&
+            (e.content as { type?: string } | undefined)?.type === "m.space",
+    );
+}
+
+/**
+ * Strip a record to a SHELL: room identity and state, no timeline.
+ *
+ * The cache is capped because IndexedDB quota is finite — but the quota is
+ * consumed almost entirely by TIMELINES (up to {@link MAX_TIMELINE} events per
+ * room), while what makes a room *known* is its state: a handful of events.
+ * Deleting whole records to protect the quota therefore threw away the cheap,
+ * load-bearing part to save the expensive part — and a deleted record under a
+ * resumed pos is an INVISIBLE room, because the server only ever sends deltas
+ * for rooms it believes we hold.
+ *
+ * So: drop the timeline, keep the room. A shelled room rehydrates as itself —
+ * right name, avatar, membership, space-ness, tombstone — with an empty
+ * timeline that the live sync (list `timeline_limit: 1`, or the room's own
+ * subscription at 50 when opened) fills in. A known room with no preview beats
+ * a room that isn't there.
+ *
+ * `prev_batch` goes with the timeline deliberately. It is the token for the
+ * START of the window we're dropping, so keeping it would let back-pagination
+ * resume BEHIND the events we just discarded and silently skip them — the same
+ * mid-timeline hole the merge path avoids. With no token and an empty timeline
+ * the room simply paginates from scratch once it has live events again.
+ */
+export function shellRecord(rec: CachedRoomRecord): CachedRoomRecord {
+    const { prev_batch: _dropped, ...rest } = rec.data;
+    return {
+        ...rec,
+        data: { ...rest, timeline: [], limited: true } as MSC3575RoomData,
+    };
+}
+
+const isShell = (rec: CachedRoomRecord): boolean => (rec.data.timeline?.length ?? 0) === 0;
+
+/**
+ * Decide what to shell and what to delete. Pure; exported for tests.
+ * See {@link SlidingSyncCache.prune} for the reasoning behind the two caps.
+ */
+export function planPrune(records: CachedRoomRecord[]): { shell: string[]; drop: string[] } {
+    const evictable = records.filter((r) => !r.pin);
+    const byBumpAscending = (a: CachedRoomRecord, b: CachedRoomRecord): number => a.bump - b.bump;
+
+    const full = evictable.filter((r) => !isShell(r)).sort(byBumpAscending);
+    const shell = full.slice(0, Math.max(0, full.length - MAX_ROOMS)).map((r) => r.roomId);
+
+    // Shelling frees no RECORDS, so the total cap is measured against the whole
+    // set and satisfied only by deleting. Records shelled above are already
+    // counted here as the shells they are about to become.
+    const shellSet = new Set(shell);
+    const drop =
+        records.length > MAX_RECORDS
+            ? evictable
+                  .filter((r) => isShell(r) || shellSet.has(r.roomId))
+                  .sort(byBumpAscending)
+                  .slice(0, records.length - MAX_RECORDS)
+                  .map((r) => r.roomId)
+            : [];
+
+    const dropSet = new Set(drop);
+    return { shell: shell.filter((id) => !dropSet.has(id)), drop };
 }
 
 function cacheDisabled(): boolean {
@@ -181,6 +276,10 @@ export class SlidingSyncCache {
      */
     private records = new Map<string, CachedRoomRecord>();
     private dirty = new Set<string>();
+    /** Records to delete from IDB on the next flush (see {@link prune}). */
+    private deletes = new Set<string>();
+    /** Set when a record was genuinely deleted — this session or a previous one. */
+    private dropped = false;
     private flushTimer: ReturnType<typeof setTimeout> | null = null;
     private closed = false;
     private readonly dbName: string;
@@ -262,6 +361,13 @@ export class SlidingSyncCache {
                 await this.clear();
                 return [];
             }
+            // Did a previous session genuinely DELETE any record? If so the
+            // persisted pos is no longer safe to resume — see droppedRecords.
+            this.dropped = await new Promise<boolean>((resolve) => {
+                const r = this.tx(db, [META_STORE], "readonly").objectStore(META_STORE).get("dropped");
+                r.onsuccess = (): void => resolve(r.result === true);
+                r.onerror = (): void => resolve(false);
+            });
             const records = await new Promise<CachedRoomRecord[]>((resolve) => {
                 const out: CachedRoomRecord[] = [];
                 const idx = this.tx(db, [STORE], "readonly").objectStore(STORE).index("bump");
@@ -279,6 +385,12 @@ export class SlidingSyncCache {
                 cursorReq.onerror = (): void => resolve(out);
             });
             const valid = records.filter((r) => r && r.schema === SCHEMA_VERSION && r.data && r.roomId);
+            // Pinned rooms (spaces) replay FIRST, then the rest by recency. The
+            // sidebar's structure is what the whole UI hangs off, so paint it
+            // before the chatter rather than somewhere in the middle of 500
+            // rooms. Stable within each group (the cursor already ordered by
+            // bump descending).
+            valid.sort((a, b) => (b.pin ?? 0) - (a.pin ?? 0));
             // Seed the merge base: subsequent live DELTAS for these rooms merge
             // against what we just loaded rather than replacing it.
             for (const r of valid) {
@@ -310,15 +422,20 @@ export class SlidingSyncCache {
         if (this.closed || !this.idb || cacheDisabled()) return;
         try {
             const prev = this.records.get(roomId);
+            const merged = mergeRoomData(prev?.data, data);
             this.records.set(roomId, {
                 roomId,
-                data: mergeRoomData(prev?.data, data),
+                data: merged,
                 // receipt/accountData are computed fresh from the Room (already
                 // merged truth) on every put, but keep the last-known copy when
                 // a put omits them.
                 receipt: receipt ?? prev?.receipt,
                 accountData: accountData ?? prev?.accountData,
                 bump: data.bump_stamp ?? Date.now(),
+                // Re-evaluated per put against the MERGED state: a room whose
+                // create event only arrives on a later delta still becomes
+                // pinned, and one that is not a space never does.
+                ...(isSpaceData(merged) ? { pin: 1 as const } : {}),
                 ts: Date.now(),
                 schema: SCHEMA_VERSION,
             });
@@ -331,15 +448,89 @@ export class SlidingSyncCache {
         }
     }
 
-    /** Write all dirty records, then evict down to MAX_ROOMS by lowest bump. */
+    /**
+     * Was a record genuinely deleted (not shelled), here or in a past session?
+     *
+     * THE POS COUPLING. Under a stateful connection the server sends deltas for
+     * rooms it believes we hold, so resuming a pos is only sound while the cache
+     * still holds everything it held when that pos was written. Shelling keeps
+     * the room, so it preserves the coupling; deleting breaks it, and the room
+     * is then invisible until something forces a reinitialise. The caller drops
+     * the pos when this is true, trading one full resync for correctness.
+     *
+     * Cleared by {@link clearDropped} once the caller has acted on it.
+     */
+    public get droppedRecords(): boolean {
+        return this.dropped;
+    }
+
+    /** Acknowledge {@link droppedRecords}: the caller has dropped the pos. */
+    public async clearDropped(): Promise<void> {
+        this.dropped = false;
+        const db = await this.open();
+        if (!db) return;
+        await new Promise<void>((resolve) => {
+            try {
+                const t = this.tx(db, [META_STORE], "readwrite");
+                t.objectStore(META_STORE).delete("dropped");
+                t.oncomplete = (): void => resolve();
+                t.onerror = (): void => resolve();
+                t.onabort = (): void => resolve();
+            } catch {
+                resolve();
+            }
+        });
+    }
+
+    /**
+     * Bring the record set back within its caps, in memory, before the write.
+     *
+     * Two caps, two very different remedies:
+     *  - more than {@link MAX_ROOMS} rooms carrying a timeline → SHELL the least
+     *    recently active (see {@link shellRecord}). The room stays known; only
+     *    its timeline goes. This is the normal, routine case and it costs
+     *    nothing but a missing preview until the next live delivery.
+     *  - more than {@link MAX_RECORDS} records in total → genuinely delete the
+     *    least recently active shells, and flag it (see {@link droppedRecords}).
+     *    Far above any real account; the flag exists so that if it ever does
+     *    happen we resync instead of silently losing rooms.
+     *
+     * Pinned records (spaces) are exempt from both.
+     *
+     * Runs against `this.records`, which loadAll seeds with every stored record,
+     * so it is the authoritative view — no cursor walk, and shelled records
+     * simply stop counting toward MAX_ROOMS instead of being re-examined on
+     * every flush.
+     */
+    private prune(): void {
+        const { shell, drop } = planPrune([...this.records.values()]);
+        for (const roomId of shell) {
+            const rec = this.records.get(roomId);
+            if (!rec) continue;
+            this.records.set(roomId, shellRecord(rec));
+            this.dirty.add(roomId);
+        }
+        for (const roomId of drop) {
+            this.records.delete(roomId);
+            this.dirty.delete(roomId);
+            this.deletes.add(roomId);
+            this.dropped = true;
+        }
+    }
+
+    /** Prune to the caps, then write everything pending in one transaction. */
     public async flush(): Promise<void> {
         if (this.flushTimer) {
             clearTimeout(this.flushTimer);
             this.flushTimer = null;
         }
-        if (this.dirty.size === 0) return;
+        if (this.dirty.size === 0 && this.deletes.size === 0) return;
+        this.prune();
         const batch = [...this.dirty].map((roomId) => this.records.get(roomId)).filter((r): r is CachedRoomRecord => !!r);
+        const deletes = [...this.deletes];
+        const dropped = this.dropped;
         this.dirty.clear();
+        this.deletes.clear();
         const db = await this.open();
         if (!db) return;
         try {
@@ -347,46 +538,17 @@ export class SlidingSyncCache {
                 const t = this.tx(db, [STORE, META_STORE], "readwrite");
                 const os = t.objectStore(STORE);
                 for (const rec of batch) os.put(rec);
+                for (const roomId of deletes) os.delete(roomId);
                 t.objectStore(META_STORE).put(SCHEMA_VERSION, "schema");
+                // Same transaction as the deletes: the flag can never be lost
+                // while the deletion it describes survives.
+                if (dropped) t.objectStore(META_STORE).put(true, "dropped");
                 t.oncomplete = (): void => resolve();
                 t.onerror = (): void => resolve();
                 t.onabort = (): void => resolve();
             });
-            await this.evict(db);
         } catch (e) {
             this.logger.warn("[sss-cache] flush failed", e);
-        }
-    }
-
-    private async evict(db: IDBDatabase): Promise<void> {
-        try {
-            const count = await new Promise<number>((resolve) => {
-                const r = this.tx(db, [STORE], "readonly").objectStore(STORE).count();
-                r.onsuccess = (): void => resolve(r.result);
-                r.onerror = (): void => resolve(0);
-            });
-            if (count <= MAX_ROOMS) return;
-            const toDrop = count - MAX_ROOMS;
-            await new Promise<void>((resolve) => {
-                const t = this.tx(db, [STORE], "readwrite");
-                // Ascending by bump → drop the least recently active first.
-                const cursorReq = t.objectStore(STORE).index("bump").openCursor(null, "next");
-                let dropped = 0;
-                cursorReq.onsuccess = (): void => {
-                    const cur = cursorReq.result;
-                    if (!cur || dropped >= toDrop) {
-                        resolve();
-                        return;
-                    }
-                    cur.delete();
-                    dropped++;
-                    cur.continue();
-                };
-                cursorReq.onerror = (): void => resolve();
-                t.onabort = (): void => resolve();
-            });
-        } catch (e) {
-            this.logger.warn("[sss-cache] evict failed", e);
         }
     }
 
@@ -394,6 +556,11 @@ export class SlidingSyncCache {
     public async clear(): Promise<void> {
         this.records.clear();
         this.dirty.clear();
+        this.deletes.clear();
+        // A cleared cache restores nothing, so the caller drops the pos on the
+        // `replayed === 0` path anyway; leaving the flag set would force a
+        // second, pointless resync on the boot after that.
+        this.dropped = false;
         const db = await this.open();
         if (!db) return;
         await new Promise<void>((resolve) => {
@@ -401,6 +568,7 @@ export class SlidingSyncCache {
                 const t = this.tx(db, [STORE, META_STORE], "readwrite");
                 t.objectStore(STORE).clear();
                 t.objectStore(META_STORE).put(SCHEMA_VERSION, "schema");
+                t.objectStore(META_STORE).delete("dropped");
                 t.oncomplete = (): void => resolve();
                 t.onerror = (): void => resolve();
                 t.onabort = (): void => resolve();
