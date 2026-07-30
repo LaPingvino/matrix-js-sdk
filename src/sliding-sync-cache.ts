@@ -151,6 +151,22 @@ export function shellRecord(rec: CachedRoomRecord): CachedRoomRecord {
     };
 }
 
+/**
+ * Repair a record that would rehydrate into a room nothing can fill.
+ *
+ * Events with no `prev_batch` is that shape: the timeline paints, but
+ * Room.backgroundBackfill bails on a missing backwards token, so the room sits at
+ * whatever few events the record held until someone scrolls by hand. Records like
+ * this exist in the wild — a shelled room merged a non-limited delta before
+ * mergeRoomData learned to take the delta's token — so drop the timeline and let
+ * the live sync re-deliver a window WITH a token. Costs one room's preview on one
+ * boot; the alternative is a chat stuck on its last few messages.
+ */
+export const repairUnfillable = (rec: CachedRoomRecord): CachedRoomRecord =>
+    (rec.data.timeline?.length ?? 0) > 0 && !rec.data.prev_batch
+        ? { ...rec, data: { ...rec.data, timeline: [], limited: true } }
+        : rec;
+
 const isShell = (rec: CachedRoomRecord): boolean => (rec.data.timeline?.length ?? 0) === 0;
 
 /**
@@ -245,7 +261,17 @@ export function mergeRoomData(prev: MSC3575RoomData | undefined, next: MSC3575Ro
 
     const prevTimeline = prev.timeline ?? [];
     const nextTimeline = next.timeline ?? [];
-    if (next.limited) {
+    if (prevTimeline.length === 0) {
+        // Nothing to be contiguous WITH. A shelled room (see shellRecord) is
+        // exactly this: state kept, timeline and prev_batch dropped. Appending to
+        // an empty tail and then keeping the cached prev_batch — which is
+        // undefined — would cache a few events with NO pagination token, and the
+        // next boot would replay a room showing only its last few messages with
+        // no way to scroll back. With no prior events the delta's window IS the
+        // whole timeline, so its token is by definition the right start token.
+        merged.timeline = nextTimeline;
+        merged.prev_batch = next.prev_batch;
+    } else if (next.limited) {
         // Doesn't connect to our cached tail: replace. prev_batch (if any)
         // matches the new window's start; an absent one wipes the old token,
         // which no longer describes this timeline's start either.
@@ -384,7 +410,11 @@ export class SlidingSyncCache {
                 };
                 cursorReq.onerror = (): void => resolve(out);
             });
-            const valid = records.filter((r) => r && r.schema === SCHEMA_VERSION && r.data && r.roomId);
+            const valid = records
+                .filter((r) => r && r.schema === SCHEMA_VERSION && r.data && r.roomId)
+                // See repairUnfillable: events with no token rehydrate into a
+                // room that nothing can fill automatically.
+                .map(repairUnfillable);
             // Pinned rooms (spaces) replay FIRST, then the rest by recency. The
             // sidebar's structure is what the whole UI hangs off, so paint it
             // before the chatter rather than somewhere in the middle of 500
@@ -413,12 +443,7 @@ export class SlidingSyncCache {
      * replaces — see {@link mergeRoomData}) and queue it for persistence
      * (debounced + coalesced).
      */
-    public put(
-        roomId: string,
-        data: MSC3575RoomData,
-        receipt?: IMinimalEvent,
-        accountData?: IMinimalEvent[],
-    ): void {
+    public put(roomId: string, data: MSC3575RoomData, receipt?: IMinimalEvent, accountData?: IMinimalEvent[]): void {
         if (this.closed || !this.idb || cacheDisabled()) return;
         try {
             const prev = this.records.get(roomId);
@@ -526,7 +551,9 @@ export class SlidingSyncCache {
         }
         if (this.dirty.size === 0 && this.deletes.size === 0) return;
         this.prune();
-        const batch = [...this.dirty].map((roomId) => this.records.get(roomId)).filter((r): r is CachedRoomRecord => !!r);
+        const batch = [...this.dirty]
+            .map((roomId) => this.records.get(roomId))
+            .filter((r): r is CachedRoomRecord => !!r);
         const deletes = [...this.deletes];
         const dropped = this.dropped;
         this.dirty.clear();

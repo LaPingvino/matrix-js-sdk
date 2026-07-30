@@ -19,6 +19,7 @@ import {
     isSpaceData,
     mergeRoomData,
     planPrune,
+    repairUnfillable,
     shellRecord,
 } from "../../src/sliding-sync-cache";
 import { type MSC3575RoomData } from "../../src/sliding-sync";
@@ -242,5 +243,89 @@ describe("SlidingSyncCache shellRecord / isSpaceData", () => {
         expect(isSpaceData(mk({ type: "m.space" }))).toBe(true);
         expect(isSpaceData(mk({}))).toBe(false);
         expect(isSpaceData({ required_state: [], timeline: [] } as unknown as MSC3575RoomData)).toBe(false);
+    });
+});
+
+describe("SlidingSyncCache mergeRoomData onto a shell", () => {
+    let counter = 0;
+    const mkEvent = (body: string): IRoomEvent => ({
+        type: "m.room.message",
+        content: { body },
+        sender: "@alice:localhost",
+        origin_server_ts: ++counter,
+        event_id: `$shell${counter}`,
+    });
+    const mkData = (overrides: Partial<MSC3575RoomData> = {}): MSC3575RoomData =>
+        ({ name: "Room", required_state: [], timeline: [], ...overrides }) as MSC3575RoomData;
+
+    it("takes the delta's prev_batch when the cached timeline is empty", () => {
+        // A shelled record: state kept, timeline and token dropped. The delta that
+        // follows is an ordinary non-limited one — it is NOT contiguous with
+        // anything, because there is nothing there.
+        const shell = mkData({ required_state: [], timeline: [], limited: true });
+        const delta = mkData({ timeline: [mkEvent("bridged message")], prev_batch: "tok-from-delta" });
+
+        const merged = mergeRoomData(shell, delta);
+
+        expect(merged.timeline).toEqual(delta.timeline);
+        // Without this the record caches events with NO token, and the room comes
+        // back after a reload showing only those events, unable to paginate.
+        expect(merged.prev_batch).toEqual("tok-from-delta");
+    });
+
+    it("still keeps the cached token when there IS a tail to be contiguous with", () => {
+        const cached = mkData({ timeline: [mkEvent("old")], prev_batch: "tok-cached" });
+        const delta = mkData({ timeline: [mkEvent("new")], prev_batch: "tok-from-delta" });
+
+        const merged = mergeRoomData(cached, delta);
+
+        expect(merged.timeline).toHaveLength(2);
+        expect(merged.prev_batch).toEqual("tok-cached");
+    });
+
+    it("keeps the room's state across the shell → delta merge", () => {
+        const shell = mkData({
+            required_state: [
+                {
+                    type: "m.room.create",
+                    state_key: "",
+                    content: { type: "m.space" },
+                    sender: "@a:b",
+                    origin_server_ts: 1,
+                    event_id: "$c",
+                } as unknown as IStateEvent,
+            ],
+            timeline: [],
+        });
+        const merged = mergeRoomData(shell, mkData({ timeline: [mkEvent("hi")], prev_batch: "t" }));
+        expect(merged.required_state).toHaveLength(1);
+    });
+});
+
+describe("SlidingSyncCache repairUnfillable", () => {
+    const rec = (data: Partial<MSC3575RoomData>): CachedRoomRecord =>
+        ({
+            roomId: "!r",
+            data: { name: "R", required_state: [], timeline: [], ...data },
+            bump: 1,
+            ts: 0,
+            schema: 2,
+        }) as CachedRoomRecord;
+    const ev = { type: "m.room.message", content: {}, event_id: "$1" } as unknown as IRoomEvent;
+
+    it("drops a timeline that has no pagination token", () => {
+        const out = repairUnfillable(rec({ timeline: [ev] }));
+        expect(out.data.timeline).toEqual([]);
+        expect(out.data.limited).toBe(true);
+    });
+
+    it("leaves a timeline that HAS a token alone", () => {
+        const input = rec({ timeline: [ev], prev_batch: "tok" });
+        expect(repairUnfillable(input)).toBe(input);
+    });
+
+    it("leaves an already-shelled record alone", () => {
+        const input = rec({ timeline: [] });
+        expect(repairUnfillable(input)).toBe(input);
     });
 });
