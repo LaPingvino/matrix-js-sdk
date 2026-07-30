@@ -68,6 +68,18 @@ export declare function isSpaceData(data: MSC3575RoomData): boolean;
  */
 export declare function shellRecord(rec: CachedRoomRecord): CachedRoomRecord;
 /**
+ * Repair a record that would rehydrate into a room nothing can fill.
+ *
+ * Events with no `prev_batch` is that shape: the timeline paints, but
+ * Room.backgroundBackfill bails on a missing backwards token, so the room sits at
+ * whatever few events the record held until someone scrolls by hand. Records like
+ * this exist in the wild — a shelled room merged a non-limited delta before
+ * mergeRoomData learned to take the delta's token — so drop the timeline and let
+ * the live sync re-deliver a window WITH a token. Costs one room's preview on one
+ * boot; the alternative is a chat stuck on its last few messages.
+ */
+export declare const repairUnfillable: (rec: CachedRoomRecord) => CachedRoomRecord;
+/**
  * Decide what to shell and what to delete. Pure; exported for tests.
  * See {@link SlidingSyncCache.prune} for the reasoning behind the two caps.
  */
