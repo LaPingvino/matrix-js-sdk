@@ -57,6 +57,17 @@ describe("SlidingSync", () => {
         return httpBackend!.stop();
     };
 
+    // The fork's resend() no longer interrupts the request already in flight:
+    // aborting one is silent data loss against Continuwuity, which commits its
+    // per-room "already sent up to pos" bookkeeping while BUILDING a response
+    // rather than when the client acks it (see SlidingSync.resend). A change made
+    // mid-connection therefore goes out on the request AFTER the outstanding
+    // long-poll. Register this BEFORE the expectation for the changed request, so
+    // the outstanding poll is answered first and the queued resend can leave.
+    const expectOutstandingPoll = (): void => {
+        httpBackend!.when("POST", syncUrl).respond(200, { pos: "a", lists: {}, extensions: {}, rooms: {} });
+    };
+
     describe("start/stop", () => {
         beforeAll(setupClient);
         afterAll(teardownClient);
@@ -199,6 +210,44 @@ describe("SlidingSync", () => {
         });
     });
 
+    describe("resend semantics", () => {
+        beforeAll(setupClient);
+        afterAll(teardownClient);
+
+        it("queues a resend instead of interrupting the request in flight", async () => {
+            // THE INVARIANT: aborting an in-flight sliding-sync request is silent data
+            // loss against Continuwuity, which marks rooms as delivered when it BUILDS
+            // a response rather than when the client acks it with the next pos — an
+            // aborted batch is never re-sent (see SlidingSync.resend). So a resend must
+            // wait for the outstanding request, never replace it.
+            const ss = new SlidingSync(proxyBaseUrl, new Map(), {}, client!, 1000);
+            httpBackend!.when("POST", syncUrl).respond(200, { pos: "a", lists: {}, extensions: {}, rooms: {} });
+            ss.start();
+            await httpBackend!.flushAllExpected();
+            // The loop is now long-polling: exactly one request outstanding.
+            await Promise.resolve();
+            const outstanding = httpBackend!.requests.length;
+            expect(outstanding).toEqual(1);
+
+            ss.modifyRoomSubscriptions(new Set<string>(["!sub:localhost"]));
+            await Promise.resolve();
+            // Still the SAME single request — the subscription rides the next one.
+            expect(httpBackend!.requests.length).toEqual(1);
+            expect(httpBackend!.requests[0].data.room_subscriptions).toBeFalsy();
+
+            httpBackend!.when("POST", syncUrl).respond(200, { pos: "b", lists: {}, extensions: {}, rooms: {} });
+            httpBackend!
+                .when("POST", syncUrl)
+                .check((req) => {
+                    expect(req.data.room_subscriptions["!sub:localhost"]).toBeTruthy();
+                })
+                .respond(200, { pos: "c", lists: {}, extensions: {}, rooms: {} });
+            await httpBackend!.flushAllExpected();
+            ss.stop();
+        });
+
+    });
+
     describe("room subscriptions", () => {
         beforeAll(setupClient);
         afterAll(teardownClient);
@@ -248,6 +297,7 @@ describe("SlidingSync", () => {
         });
 
         it("should be possible to adjust room subscription info whilst syncing", async () => {
+            expectOutstandingPoll();
             // listen for updated request
             const newSubInfo = {
                 timeline_limit: 100,
@@ -284,6 +334,7 @@ describe("SlidingSync", () => {
         });
 
         it("should be possible to add room subscriptions whilst syncing", async () => {
+            expectOutstandingPoll();
             // listen for updated request
             const anotherRoomData = {
                 name: "foo bar 2",
@@ -332,6 +383,7 @@ describe("SlidingSync", () => {
 
         // TODO: this does not exist in MSC4186
         it("should be able to unsubscribe from a room", async () => {
+            expectOutstandingPoll();
             httpBackend!
                 .when("POST", syncUrl)
                 .check(function (req) {
@@ -455,6 +507,7 @@ describe("SlidingSync", () => {
         });
 
         it("should be possible to adjust list ranges", async () => {
+            expectOutstandingPoll();
             // modify the list ranges
             httpBackend!
                 .when("POST", syncUrl)
@@ -495,6 +548,7 @@ describe("SlidingSync", () => {
         });
 
         it("should be possible to add an extra list", async () => {
+            expectOutstandingPoll();
             // add extra list
             const extraListReq = {
                 ranges: [[0, 100]],
@@ -621,6 +675,7 @@ describe("SlidingSync", () => {
             await httpBackend!.flushAllExpected();
 
             // now the user clicks on a room which uses the default sub
+            expectOutstandingPoll();
             httpBackend!
                 .when("POST", syncUrl)
                 .check(function (req) {
@@ -639,6 +694,7 @@ describe("SlidingSync", () => {
             await httpBackend!.flushAllExpected();
 
             // now the user clicks on a room which uses a custom sub
+            expectOutstandingPoll();
             httpBackend!
                 .when("POST", syncUrl)
                 .check(function (req) {
@@ -659,6 +715,7 @@ describe("SlidingSync", () => {
             await httpBackend!.flushAllExpected();
 
             // now the user uses a different sub for the same room: we don't unsub but just resend
+            expectOutstandingPoll();
             httpBackend!
                 .when("POST", syncUrl)
                 .check(function (req) {
@@ -758,6 +815,7 @@ describe("SlidingSync", () => {
             await httpBackend!.flushAllExpected();
 
             // using the same subscription doesn't unsub nor changes subscriptions
+            expectOutstandingPoll();
             slidingSync.useCustomSubscription(roomA, customSubName1);
             slidingSync.modifyRoomSubscriptions(new Set<string>([roomA]));
 
@@ -775,10 +833,10 @@ describe("SlidingSync", () => {
                     extensions: {},
                     rooms: {},
                 });
-            slidingSync.start();
             await httpBackend!.flushAllExpected();
 
             // Changing the subscription works
+            expectOutstandingPoll();
             slidingSync.useCustomSubscription(roomA, customSubName2);
             slidingSync.modifyRoomSubscriptions(new Set<string>([roomA]));
 
@@ -797,7 +855,6 @@ describe("SlidingSync", () => {
                     extensions: {},
                     rooms: {},
                 });
-            slidingSync.start();
             await httpBackend!.flushAllExpected();
             slidingSync.stop();
         });
@@ -891,6 +948,7 @@ describe("SlidingSync", () => {
         });
 
         it("should be able to send nothing in an extension request/response", async () => {
+            expectOutstandingPoll();
             onPreExtensionRequest = async () => {
                 return undefined;
             };
@@ -925,6 +983,7 @@ describe("SlidingSync", () => {
         });
 
         it("is possible to register extensions after start() has been called", async () => {
+            expectOutstandingPoll();
             slidingSync.registerExtension(extPost);
             onPostExtensionRequest = async () => {
                 return extReq;

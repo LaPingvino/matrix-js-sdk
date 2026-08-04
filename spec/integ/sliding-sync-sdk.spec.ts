@@ -428,6 +428,64 @@ describe("SlidingSyncSdk", () => {
                 expect(gotRoom!.currentState.getJoinRule()).toEqual(JoinRule.Invite);
             });
 
+            it("applies a declined invite locally and forgets its cache record", async () => {
+                // Sliding sync has no `leave` section and Continuwuity's v5 simply
+                // omits a room once we are neither joined, invited nor knocking, so
+                // NOTHING ever comes back to say we left. The 200 from /leave is the
+                // only statement we get — if we don't apply it, the invite stays and
+                // the cached invite_state replays it on the next boot.
+                // Its own room: roomE may already be in the store from an earlier
+                // test, and then ClientEvent.Room never fires again.
+                const roomId = "!declined_invite:localhost";
+                mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomId, {
+                    name: "Declined",
+                    required_state: [],
+                    timeline: [],
+                    initial: true,
+                    invite_state: [
+                        {
+                            type: EventType.RoomMember,
+                            content: { membership: KnownMembership.Invite },
+                            state_key: selfUserId,
+                            sender: "@bob:localhost",
+                            event_id: "$declined_invite",
+                            origin_server_ts: 123456,
+                        },
+                    ],
+                });
+                await emitPromise(client!, ClientEvent.Room);
+                const gotRoom = client!.getRoom(roomId)!;
+                expect(gotRoom.getMyMembership()).toEqual(KnownMembership.Invite);
+
+                const roomCache = (sdk as unknown as { roomCache: { forget(roomId: string): void } }).roomCache;
+                const forget = jest.spyOn(roomCache, "forget");
+                const membershipChanges: string[] = [];
+                const onMembership = (_r: Room, m: string): void => {
+                    membershipChanges.push(m);
+                };
+                client!.on(RoomEvent.MyMembership, onMembership);
+
+                httpBackend!.when("POST", "/rooms/" + encodeURIComponent(roomId) + "/leave").respond(200, {});
+                const left = client!.leave(roomId);
+                // Flush just this one request: other tests in this suite leave their
+                // own expectations queued, and flushAllExpected would wait on them.
+                await httpBackend!.flush(undefined, 1);
+                await left;
+                client!.off(RoomEvent.MyMembership, onMembership);
+
+                expect(gotRoom.getMyMembership()).toEqual(KnownMembership.Leave);
+                expect(membershipChanges).toEqual([KnownMembership.Leave]);
+                // The self member event must agree with the flag: recalculate()
+                // re-derives membership from it, and "no self member event" is how
+                // consumers detect a malformed invite — either would resurrect it.
+                expect(
+                    gotRoom.currentState.getStateEvents(EventType.RoomMember, selfUserId)?.getContent().membership,
+                ).toEqual(KnownMembership.Leave);
+                gotRoom.recalculate();
+                expect(gotRoom.getMyMembership()).toEqual(KnownMembership.Leave);
+                expect(forget).toHaveBeenCalledWith(roomId);
+            });
+
             it("uses the 'name' field to caluclate the room name", async () => {
                 mockSlidingSync!.emit(SlidingSyncEvent.RoomData, roomF, data[roomF]);
                 await emitPromise(client!, ClientEvent.Room);

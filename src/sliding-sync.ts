@@ -778,9 +778,39 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
     }
 
     /**
-     * Resend a Sliding Sync request. Used when something has changed in the request.
+     * Resend a Sliding Sync request. Used when something has changed in the request
+     * (new room subscriptions, changed list ranges, a local "catch up now").
+     *
+     * DOES NOT interrupt a request that is already in flight — it queues the resend,
+     * and the loop issues it the moment the current round-trip has been received and
+     * processed. Aborting is data loss against Continuwuity: its `v5` handler commits
+     * the per-room "already sent up to pos" bookkeeping (`update_snake_sync_known_rooms`,
+     * for LIST rooms and for `subscriptions` alike) while BUILDING the response, not
+     * when the client acks it by returning with the new pos. So a response that was
+     * committed but never received is never re-sent: the room's timeline/state in that
+     * batch is simply gone, and the room stays at the lean list window until unrelated
+     * activity or a reinitialise. That is the "chat opens late / half-empty" symptom,
+     * and the trigger was self-inflicted — subscribing a room on open aborted the very
+     * request that was carrying the previous room's inflated payload.
+     *
+     * The cost is latency: a queued resend waits out the remaining long-poll (bounded by
+     * `timeoutMS`). A known, bounded delay beats an unbounded, silent loss.
+     *
+     * Use {@link resendInterrupting} where aborting is provably safe.
      */
     public resend(): void {
+        this.needsResend = true;
+    }
+
+    /**
+     * Resend AND abort the in-flight request.
+     *
+     * Only safe when losing whatever the server may have just committed doesn't matter —
+     * i.e. when the next request starts the connection over (`pos` dropped, `since=0`,
+     * server forgets this conn_id and re-sends everything as initial). See {@link resend}
+     * for why an abort is otherwise lossy.
+     */
+    private resendInterrupting(): void {
         this.needsResend = true;
         this.abortController?.abort();
         this.abortController = new AbortController();
@@ -798,13 +828,19 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
      * returns, collapsing incoming-message latency to near-instant regardless of the bug. With this
      * in place the base `timeoutMS` can stay long (idle-cheap) while latency stays low.
      *
-     * Reuses the same intentional-abort path as {@link resend} (no backoff, no sticky-param reset).
      * Safe to call before start() or after stop() (no-op). Frequent calls are fine, but the caller
      * should coalesce bursts (debounce) so a flurry of activity doesn't issue a request per event.
+     *
+     * WARNING: this INTERRUPTS the in-flight request, and against Continuwuity an interrupted
+     * request loses whatever that response had already been committed as delivered (see
+     * {@link resend}). It is a latency workaround for a server that returns stale-but-advanced
+     * responses; currently unused by both consumers (the classic-/sync heartbeat it was built
+     * for was removed — every /sync that advances `since` shreds the to-device queue). Prefer
+     * {@link resend} unless you have measured that the latency matters more than the loss.
      */
     public poke(): void {
         if (this.terminated) return;
-        this.resend();
+        this.resendInterrupting();
     }
 
     /**
@@ -876,7 +912,9 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
      */
     public reinitialize(): void {
         this.forceReinit = true;
-        this.resend();
+        // Safe to interrupt: the next request drops pos, so the server forgets this
+        // conn_id's bookkeeping entirely and re-sends everything as initial:true.
+        this.resendInterrupting();
     }
 
     /**

@@ -3969,8 +3969,57 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      * @returns Promise which resolves: `{}` an empty object.
      * @returns Rejects: with an error response.
      */
-    public leave(roomId: string): Promise<EmptyObject> {
-        return this.membershipChange(roomId, undefined, KnownMembership.Leave);
+    public async leave(roomId: string): Promise<EmptyObject> {
+        const response = await this.membershipChange(roomId, undefined, KnownMembership.Leave);
+        // A 200 from /leave IS the statement "we are no longer in this room" —
+        // apply it locally instead of waiting for a sync to say it back.
+        //
+        // Classic /sync always echoes the leave in the `leave` section, so the SDK
+        // could rely on the server to tell it. Sliding sync has no such section:
+        // MSC4186 lists carry joined/invited/knocked rooms, and Continuwuity's v5
+        // simply OMITS a room once we are none of those (see collect_sync_response's
+        // `allowed_rooms`). Nothing ever arrives, so `selfMembership` stayed at
+        // `invite`/`join` FOREVER, RoomEvent.MyMembership never fired, and every
+        // consumer bound to it kept showing the room — a declined invite sat in the
+        // inbox, and the persisted room cache replayed its invite_state on the next
+        // boot, resurrecting it for good.
+        this.applyLocalLeave(roomId);
+        return response;
+    }
+
+    /**
+     * Record locally that we have left a room, as if sync had delivered it.
+     *
+     * Writes a synthesized `m.room.member` leave for ourselves into current state
+     * BEFORE flipping `selfMembership`, because membership is derived from that
+     * state event in more than one place: {@link Room.recalculate} re-reads it (and
+     * would otherwise flip us straight back to `invite` off the stale member event),
+     * and consumers that detect malformed invites do so by the ABSENCE of a self
+     * member event. Setting only the flag would leave those disagreeing with it.
+     *
+     * Idempotent, and a no-op for a room we don't hold.
+     */
+    private applyLocalLeave(roomId: string): void {
+        const room = this.getRoom(roomId);
+        const userId = this.getUserId();
+        if (!room || !userId) return;
+        if (room.getMyMembership() === KnownMembership.Leave) return;
+        try {
+            room.currentState.setStateEvents([
+                new MatrixEvent({
+                    type: EventType.RoomMember,
+                    state_key: userId,
+                    content: { membership: KnownMembership.Leave },
+                    event_id: "$fake-local-leave-" + Date.now(),
+                    room_id: roomId,
+                    sender: userId,
+                    origin_server_ts: Date.now(),
+                }),
+            ]);
+        } catch (e) {
+            this.logger.warn(`Failed to record local leave state for ${roomId}`, e);
+        }
+        room.updateMyMembership(KnownMembership.Leave);
     }
 
     /**
