@@ -154,6 +154,19 @@ export declare class SlidingSyncCache {
      */
     put(roomId: string, data: MSC3575RoomData, receipt?: IMinimalEvent, accountData?: IMinimalEvent[]): void;
     /**
+     * Drop a room we deliberately left behind — a left/declined/banned room.
+     *
+     * Deliberately NOT {@link prune}'s delete: that one sets {@link droppedRecords}
+     * because it loses a room the server still believes we hold, which breaks the
+     * pos coupling. Here the server has ALSO stopped sending the room (it is no
+     * longer in any list), so forgetting it keeps the two views in agreement —
+     * flagging it would force a pointless full resync on the next boot.
+     *
+     * Without this, a declined invite's cached invite_state replays on the next
+     * boot and puts the invite straight back (see MatrixClient.leave).
+     */
+    forget(roomId: string): void;
+    /**
      * Was a record genuinely deleted (not shelled), here or in a past session?
      *
      * THE POS COUPLING. Under a stateful connection the server sends deltas for

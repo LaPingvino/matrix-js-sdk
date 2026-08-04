@@ -1652,6 +1652,19 @@ export declare class MatrixClient extends TypedEventEmitter<EmittedEvents, Clien
      */
     leave(roomId: string): Promise<EmptyObject>;
     /**
+     * Record locally that we have left a room, as if sync had delivered it.
+     *
+     * Writes a synthesized `m.room.member` leave for ourselves into current state
+     * BEFORE flipping `selfMembership`, because membership is derived from that
+     * state event in more than one place: {@link Room.recalculate} re-reads it (and
+     * would otherwise flip us straight back to `invite` off the stale member event),
+     * and consumers that detect malformed invites do so by the ABSENCE of a self
+     * member event. Setting only the flag would leave those disagreeing with it.
+     *
+     * Idempotent, and a no-op for a room we don't hold.
+     */
+    private applyLocalLeave;
+    /**
      * Leaves all rooms in the chain of room upgrades based on the given room. By
      * default, this will leave all the previous and upgraded rooms, including the
      * given room. To only leave the given room and any previous rooms, keeping the
