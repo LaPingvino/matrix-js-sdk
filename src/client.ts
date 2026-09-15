@@ -3766,6 +3766,9 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                 // the promise forever — wedging the client's fixed pool of preview slots and leaving
                 // the card stuck on its spinner. Bound it so the request always settles.
                 localTimeoutMs: 20000,
+                // A preview failure (e.g. 401 from a broken, proxying, or restarting preview shim)
+                // must never emit SessionLoggedOut and shred the user's primary Matrix session.
+                inhibitLogoutEmit: true,
             },
         );
         // TODO: Expire the URL preview cache sometimes
