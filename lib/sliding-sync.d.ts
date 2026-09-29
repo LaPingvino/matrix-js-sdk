@@ -183,9 +183,13 @@ export interface SlidingSyncCreateOpts {
     timelineLimit?: number;
     /** timeline_limit for opened-room subscriptions. Default 50. */
     roomSubscriptionTimelineLimit?: number;
-    /** initial list window size. Default 100. */
+    /** initial list window size (both lists). Default 20: the first request only builds
+     * what the user sees first, so first paint stays fast on large accounts. */
     windowSize?: number;
-    /** how much to grow a list window by per step until it covers every room. Default 200. */
+    /** how much each list window grows per successful sync until it covers every room.
+     * Default 50. Growth is bounded on purpose: on Continuwuity 26.9 every room in a
+     * window costs the server ~0.25-0.5s to build, so one "jump to all rooms" request
+     * for a 600-room account took minutes. */
     growBy?: number;
     /** request timeout in ms. Default 10000. Shorter than classic /sync because
      * Continuwuity's sliding sync holds the long-poll for the full timeout rather
@@ -207,9 +211,9 @@ export declare const DEFAULT_SLIDING_SYNC_REQUIRED_STATE: string[][];
  * the space hierarchy edge (`m.space.child`) needed to build the tree — and
  * NOTHING heavier.
  *
- * This list grows its window to cover EVERY room the server reports for it, and
- * on a server that ignores the `room_types` filter (Continuwuity) that means
- * every room you're in. Carrying per-room `m.room.power_levels` / widgets /
+ * This list grows its window (in steps) to cover every space you're in. Older
+ * Continuwuity ignored the `room_types` filter, so it meant every ROOM you're in;
+ * it applies MSC4186 filters since 7789399ba. Carrying per-room `m.room.power_levels` / widgets /
  * emoji-pack state for all of them (as the subscription set below does) made the
  * spaces load slow and trickle in. A space only needs that heavy state when you
  * OPEN or manage it — at which point it gets a room subscription (the set below)
