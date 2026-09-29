@@ -26,6 +26,16 @@ import { type HTTPError } from "./http-api/index.ts";
 // to keep open the connection. This constant is *ADDED* to the timeout= value
 // to determine the max time we're willing to wait.
 const BUFFER_PERIOD_MS = 10 * 1000;
+// Local (client-side) timeout for a request that makes the server BUILD room data:
+// the initial request of a connection, and any request whose list ranges grew. Its
+// duration scales with the number of rooms, not with the long-poll timeout — on
+// Continuwuity 26.9 an initial window costs ~0.25-0.5s PER ROOM (100 rooms = 53s,
+// 626 rooms = 150s+). With the old `timeout + BUFFER_PERIOD_MS` (= 10s for the
+// initial timeout=0 request) the client aborted every cold start before the server
+// could answer, retried, and never loaded — while the server kept burning CPU on
+// responses nobody waited for. Pure long-polls keep the short limit so a dead
+// connection is still noticed quickly.
+const BUILD_TIMEOUT_MS = 5 * 60 * 1000;
 
 export const MSC3575_WILDCARD = "*";
 export const MSC3575_STATE_KEY_ME = "$ME";
@@ -306,9 +316,13 @@ export interface SlidingSyncCreateOpts {
     timelineLimit?: number;
     /** timeline_limit for opened-room subscriptions. Default 50. */
     roomSubscriptionTimelineLimit?: number;
-    /** initial list window size. Default 100. */
+    /** initial list window size (both lists). Default 20: the first request only builds
+     * what the user sees first, so first paint stays fast on large accounts. */
     windowSize?: number;
-    /** how much to grow a list window by per step until it covers every room. Default 200. */
+    /** how much each list window grows per successful sync until it covers every room.
+     * Default 50. Growth is bounded on purpose: on Continuwuity 26.9 every room in a
+     * window costs the server ~0.25-0.5s to build, so one "jump to all rooms" request
+     * for a 600-room account took minutes. */
     growBy?: number;
     /** request timeout in ms. Default 10000. Shorter than classic /sync because
      * Continuwuity's sliding sync holds the long-poll for the full timeout rather
@@ -355,9 +369,9 @@ export const DEFAULT_SLIDING_SYNC_REQUIRED_STATE: string[][] = [
  * the space hierarchy edge (`m.space.child`) needed to build the tree — and
  * NOTHING heavier.
  *
- * This list grows its window to cover EVERY room the server reports for it, and
- * on a server that ignores the `room_types` filter (Continuwuity) that means
- * every room you're in. Carrying per-room `m.room.power_levels` / widgets /
+ * This list grows its window (in steps) to cover every space you're in. Older
+ * Continuwuity ignored the `room_types` filter, so it meant every ROOM you're in;
+ * it applies MSC4186 filters since 7789399ba. Carrying per-room `m.room.power_levels` / widgets /
  * emoji-pack state for all of them (as the subscription set below does) made the
  * spaces load slow and trickle in. A space only needs that heavy state when you
  * OPEN or manage it — at which point it gets a room subscription (the set below)
@@ -473,12 +487,12 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
         // rooms get the heavy set via their subscription.
         const spacesRequiredState = opts.spacesRequiredState ?? DEFAULT_SLIDING_SYNC_SPACES_LIST_REQUIRED_STATE;
         const subscriptionRequiredState = opts.subscriptionRequiredState ?? DEFAULT_SLIDING_SYNC_SPACES_REQUIRED_STATE;
-        const windowSize = opts.windowSize ?? 100;
+        const windowSize = opts.windowSize ?? 20;
         const lists = new Map<string, MSC3575List>([
             [
                 "spaces",
                 {
-                    ranges: [[0, 199]],
+                    ranges: [[0, windowSize - 1]],
                     timeline_limit: 0,
                     required_state: spacesRequiredState,
                     filters: { room_types: ["m.space"] },
@@ -532,30 +546,31 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
         // 3s poll was a workaround for the stateless full-recompute era.) The
         // initial request still uses timeout=0.
         const ss = new SlidingSync(client.baseUrl, lists, roomSubscription, client, opts.timeoutMS ?? 30_000, connId);
-        // Grow each list's window to cover EVERY room the server reports for that
-        // list, so consumers that want "all rooms" / "all spaces" reliably get
-        // them without managing ranges. The spaces list needs this too: on a
-        // server that doesn't honour the room_types filter it degrades to a
-        // recency list, so low-sorting space rooms sit beyond the initial window.
+        // Grow each list's window until it covers EVERY room the server reports for
+        // that list, so consumers that want "all rooms" / "all spaces" reliably get
+        // them without managing ranges.
         //
-        // We jump straight to full coverage (`[0, joinedCount]`) the first time a
-        // sync reveals the count, rather than growing by `growBy` per sync. The
-        // incremental approach needed N round-trips for N*growBy rooms — and on a
-        // flaky link, where Complete events are rare, the window could stall and
-        // never cover a large spaces list (a reported regression). The small
-        // initial window still gives a fast first paint; this one extra growth
-        // step then guarantees completeness. `growBy` is kept for API compat but
-        // only caps how far a SINGLE step may jump (defaults large enough to
-        // cover normal accounts in one go).
+        // History: this used to jump straight to `[0, joinedCount]` after the first
+        // sync, because stepped growth once stalled on a flaky link ("Complete events
+        // are rare") and a large spaces list never filled — spaces then sorted low
+        // because Continuwuity ignored the room_types filter. Both halves changed:
+        // Continuwuity applies the filter now (7789399ba), and the rare Completes
+        // were most likely our own 10s local abort of every slow build request (see
+        // BUILD_TIMEOUT_MS), not the link. Meanwhile the jump became the problem:
+        // one request building 600+ rooms took minutes and was aborted forever.
+        // So: small first window, bounded steps, generous timeout for each step.
         const growStep = (key: string): void => {
             const data = ss.getListData(key);
             if (!data) return;
             const end = ss.getListParams(key)?.ranges?.[0]?.[1] ?? windowSize - 1;
             if (data.joinedCount > end + 1) {
-                // Default: jump straight to full coverage so the list completes in
-                // ONE growth step (robust on flaky links). If a caller passed an
-                // explicit growBy, honour it as a per-step cap instead.
-                const target = opts.growBy ? Math.min(end + opts.growBy, data.joinedCount) : data.joinedCount;
+                // Grow in bounded steps, never one "all rooms" jump: the server's cost
+                // scales with the rooms it has to build, so a small first window paints
+                // fast and the rest streams in behind it. Complete fires on every
+                // successful cycle, so growth keeps going (just slower) on a flaky
+                // link, and the build-request timeout (BUILD_TIMEOUT_MS) keeps a slow
+                // step from being aborted and retried forever.
+                const target = Math.min(end + (opts.growBy ?? 50), data.joinedCount);
                 ss.setListRanges(key, [[0, target]]);
             }
         };
@@ -971,6 +986,9 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
         // feeling slow. 350ms over 12 rounds covers the whole handshake and cuts each
         // step ~6x. Only the dedicated encryption sync carries the to_device
         // extension, so this fast polling never touches the room/list sync.
+        // Ranges the server last ANSWERED per list (only advanced on success, so a
+        // growth request that failed is retried with the generous timeout too).
+        const answeredRanges = new Map<string, string>();
         let boostPolls = 0;
         const BOOST_TIMEOUT_MS = 350;
         const BOOST_ROUNDS = 12;
@@ -993,6 +1011,9 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
                 this.lists.forEach((l: SlidingList, key: string) => {
                     reqLists[key] = l.getList(true);
                 });
+                const rangesGrew = Object.entries(reqLists).some(
+                    ([key, list]) => answeredRanges.get(key) !== JSON.stringify(list.ranges ?? []),
+                );
                 // The very first request of a connection (no pos) must return the
                 // initial window IMMEDIATELY rather than long-poll — the priority
                 // rooms should paint before any timeout. timeout=0 means "send what
@@ -1010,7 +1031,10 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
                     lists: reqLists,
                     pos: currentPos,
                     timeout: effectiveTimeout,
-                    clientTimeout: effectiveTimeout + BUFFER_PERIOD_MS,
+                    clientTimeout:
+                        isInitial || rangesGrew
+                            ? Math.max(effectiveTimeout + BUFFER_PERIOD_MS, BUILD_TIMEOUT_MS)
+                            : effectiveTimeout + BUFFER_PERIOD_MS,
                     extensions: await this.getExtensionRequest(isInitial),
                     ...(this.connId ? { conn_id: this.connId } : {}),
                 };
@@ -1052,6 +1076,9 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
                 this.lists.forEach((l) => {
                     l.setModified(false);
                 });
+                for (const [key, list] of Object.entries(reqLists)) {
+                    answeredRanges.set(key, JSON.stringify(list.ranges ?? []));
+                }
                 // set default empty values so we don't need to null check
                 resp.lists = resp.lists ?? {};
                 resp.rooms = resp.rooms ?? {};
