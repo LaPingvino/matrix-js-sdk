@@ -252,6 +252,12 @@ export function mergeRoomData(prev: MSC3575RoomData | undefined, next: MSC3575Ro
         if (v !== undefined && v !== null) overlay[k] = v;
     }
     const merged = { ...prev, ...overlay } as MSC3575RoomData;
+    // An invite that has been accepted: the join arrives as a non-initial delta with a timeline or
+    // state and no invite_state, so keep-last-known would carry the stale invite_state forward and
+    // the next boot's rehydrate would paint the room as a pending invite with no messages.
+    if (prev.invite_state && !next.invite_state && (next.timeline?.length || next.required_state?.length)) {
+        delete (merged as { invite_state?: unknown }).invite_state;
+    }
 
     // required_state: union by (type, state_key), incoming wins.
     const state = new Map<string, TimelineEntry>();

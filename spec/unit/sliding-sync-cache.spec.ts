@@ -79,6 +79,17 @@ describe("SlidingSyncCache mergeRoomData", () => {
         expect(merged.is_dm).toEqual(true); // kept
     });
 
+    it("drops a stale invite_state once the invite was accepted (a join delta)", () => {
+        const prev = mkData({ invite_state: [mkState("m.room.member", "@me:localhost")] } as Partial<MSC3575RoomData>);
+        const join = mkData({ timeline: [mkEvent("hello")], required_state: [mkState("m.room.member", "@me:localhost")] });
+        const merged = mergeRoomData(prev, join) as MSC3575RoomData & { invite_state?: unknown };
+        expect(merged.invite_state).toBeUndefined();
+        expect(merged.timeline.length).toEqual(1);
+        // A delta that still carries invite_state (still an invite) keeps it.
+        const stillInvited = mergeRoomData(prev, mkData({ invite_state: [mkState("m.room.name", "")] } as Partial<MSC3575RoomData>)) as MSC3575RoomData & { invite_state?: unknown[] };
+        expect(stillInvited.invite_state?.length).toEqual(1);
+    });
+
     it("unions required_state by (type, state_key) with the delta winning", () => {
         const prev = mkData({
             required_state: [mkState("m.room.name", "", { name: "old" }), mkState("m.room.encryption", "")],
