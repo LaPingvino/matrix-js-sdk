@@ -442,6 +442,8 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
      * the server's most expensive work against an already struggling homeserver.
      */
     private abortedByUs = false;
+    /** Each list's ranges as first given: what a fresh connection starts from (see shrinkToInitialWindows). */
+    private readonly initialRanges = new Map<string, number[][]>();
 
     /**
      * Create a new sliding sync instance
@@ -463,6 +465,19 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
         this.lists = new Map<string, SlidingList>();
         lists.forEach((list, key) => {
             this.lists.set(key, new SlidingList(list));
+            if (list.ranges) this.initialRanges.set(key, list.ranges.map((r) => [...r]));
+        });
+    }
+
+    /**
+     * A dropped pos means a since=0 request: the server builds every room in the lists' windows from
+     * scratch. Keeping the fully grown windows (~650 rooms) made that one request take minutes after
+     * every server restart (Continuwuity keeps connection state in memory, so a restart expires every
+     * client at once). Start again from the first window; growth regrows it step by step.
+     */
+    private shrinkToInitialWindows(): void {
+        this.initialRanges.forEach((ranges, key) => {
+            this.lists.get(key)?.updateListRange(ranges.map((r) => [...r]));
         });
     }
 
@@ -1009,6 +1024,7 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
                 this.forceReinit = false;
                 currentPos = undefined;
                 this.persistPos(undefined);
+                this.shrinkToInitialWindows();
                 this.lists.forEach((l) => l.setModified(true));
                 this.confirmedRoomSubscriptions = new Set<string>();
             }
@@ -1124,6 +1140,7 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
                         this.resetup();
                         currentPos = undefined;
                         this.persistPos(undefined); // drop the stale pos
+                        this.shrinkToInitialWindows();
                         await sleep(50); // in case the 400 was for something else; don't tightloop
                         continue;
                     } // else fallthrough to generic error handling
