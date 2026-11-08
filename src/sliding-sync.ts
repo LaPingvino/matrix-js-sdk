@@ -420,7 +420,6 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
     private listModifiedCount = 0;
     private terminated = false;
     // flag set when resend() is called because we cannot rely on detecting AbortError in JS SDK :(
-    private needsResend = false;
     // Set by reinitialize(): the next loop iteration drops pos and re-inits the connection.
     private forceReinit = false;
     // map of extension name to req/resp handler
@@ -436,6 +435,13 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
 
     private pendingReq?: Promise<MSC3575SlidingSyncResponse>;
     private abortController?: AbortController;
+    /**
+     * Set when WE abort the in-flight request (resendInterrupting / stop), so the loop can tell that
+     * apart from the client-side timeout, which also surfaces as an AbortError (fetch.ts). Ours is
+     * retried at once; a timeout is a failure and backs off — retrying it immediately re-triggered
+     * the server's most expensive work against an already struggling homeserver.
+     */
+    private abortedByUs = false;
 
     /**
      * Create a new sliding sync instance
@@ -814,7 +820,8 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
      * Use {@link resendInterrupting} where aborting is provably safe.
      */
     public resend(): void {
-        this.needsResend = true;
+        // Nothing to do: every request is built from the current lists and subscriptions, so the
+        // next one (after the in-flight long-poll returns) carries the change.
     }
 
     /**
@@ -826,7 +833,7 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
      * for why an abort is otherwise lossy.
      */
     private resendInterrupting(): void {
-        this.needsResend = true;
+        this.abortedByUs = true;
         this.abortController?.abort();
         this.abortController = new AbortController();
     }
@@ -863,6 +870,7 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
      */
     public stop(): void {
         this.terminated = true;
+        this.abortedByUs = true;
         this.abortController?.abort();
         // remove all listeners so things can be GC'd
         this.removeAllListeners(SlidingSyncEvent.Lifecycle);
@@ -993,7 +1001,6 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
         const BOOST_TIMEOUT_MS = 350;
         const BOOST_ROUNDS = 12;
         while (!this.terminated) {
-            this.needsResend = false;
             if (this.forceReinit) {
                 // Requested via reinitialize(): start the connection over. The
                 // since=0 request makes the server forget this conn_id's state
@@ -1014,6 +1021,12 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
                 const rangesGrew = Object.entries(reqLists).some(
                     ([key, list]) => answeredRanges.get(key) !== JSON.stringify(list.ranges ?? []),
                 );
+                // New room subscriptions are a build too: the server computes each room from scratch
+                // (~0.25–0.5 s a room on Continuwuity), so a request carrying hundreds of m.direct rooms
+                // outlasts the long-poll timeout, was aborted, re-sent with the same subscriptions, and
+                // never completed.
+                const subscribing =
+                    difference(this.desiredRoomSubscriptions, this.confirmedRoomSubscriptions).size > 0;
                 // The very first request of a connection (no pos) must return the
                 // initial window IMMEDIATELY rather than long-poll — the priority
                 // rooms should paint before any timeout. timeout=0 means "send what
@@ -1032,7 +1045,7 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
                     pos: currentPos,
                     timeout: effectiveTimeout,
                     clientTimeout:
-                        isInitial || rangesGrew
+                        isInitial || rangesGrew || subscribing
                             ? Math.max(effectiveTimeout + BUFFER_PERIOD_MS, BUILD_TIMEOUT_MS)
                             : effectiveTimeout + BUFFER_PERIOD_MS,
                     extensions: await this.getExtensionRequest(isInitial),
@@ -1055,6 +1068,7 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
                         reqBody.room_subscriptions[roomId] = sub;
                     }
                 }
+                this.abortedByUs = false;
                 this.pendingReq = this.client.slidingSync(reqBody, this.proxyBaseUrl, this.abortController.signal);
                 resp = await this.pendingReq;
                 // NOTE: pos is NOT advanced or persisted here. The server treats the
@@ -1099,7 +1113,12 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
             } catch (err) {
                 if ((<HTTPError>err).httpStatus) {
                     this.invokeLifecycleListeners(SlidingSyncState.RequestFinished, null, <Error>err);
-                    if ((<HTTPError>err).httpStatus === 400) {
+                    const errcode = (err as { errcode?: string }).errcode;
+                    // Only an expired connection resets it (M_UNKNOWN_POS; a bare 400 from older
+                    // proxies too). Any other 400 is a request the server rejects: resetting and
+                    // retrying every 50 ms looped at ~20 requests/s (and, on the encryption
+                    // connection, re-queried every tracked user's devices each time). It backs off.
+                    if ((<HTTPError>err).httpStatus === 400 && (!errcode || errcode === "M_UNKNOWN_POS")) {
                         // session probably expired TODO: assign an errcode
                         // so drop state and re-request
                         this.resetup();
@@ -1108,8 +1127,12 @@ export class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, SlidingSync
                         await sleep(50); // in case the 400 was for something else; don't tightloop
                         continue;
                     } // else fallthrough to generic error handling
-                } else if (this.needsResend || (<Error>err).name === "AbortError") {
-                    continue; // don't sleep as we caused this error by abort()ing the request.
+                } else if (this.abortedByUs || this.terminated) {
+                    continue; // we abort()ed it ourselves: re-issue at once, nothing failed.
+                } else if ((<Error>err).name === "AbortError") {
+                    // The client-side timeout: the server didn't answer in time. Say so (the app can
+                    // show "reconnecting") and back off below like any other failure.
+                    this.invokeLifecycleListeners(SlidingSyncState.RequestFinished, null, <Error>err);
                 }
                 logger.error(err);
                 // Exponential backoff with jitter instead of a flat 5s. A
