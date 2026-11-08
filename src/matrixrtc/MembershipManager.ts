@@ -270,6 +270,8 @@ export class MembershipManager
                     const oldestMembership = this.getOldestMembership();
                     return oldestMembership?.getPreferredFoci()[0];
                 }
+                // multi_sfu: we publish on our own preferred focus.
+                if (this.focusActive.focus_selection === "multi_sfu") return this.fociPreferred?.[0];
             } else {
                 this.logger.warn("Unknown own ActiveFocus type. This makes it impossible to connect to an SFU.");
             }
@@ -748,7 +750,12 @@ export class MembershipManager
             scope: "m.room",
             device_id: this.deviceId,
             expires,
-            focus_active: { type: "livekit", focus_selection: "oldest_membership" },
+            // The focus_active the caller joined with (multi_sfu for Wally since 2026-11-08); it was
+            // hard-coded to oldest_membership, so the event never said what the client did.
+            focus_active:
+                this.focusActive && isLivekitFocusActive(this.focusActive)
+                    ? { type: "livekit", focus_selection: this.focusActive.focus_selection }
+                    : { type: "livekit", focus_selection: "oldest_membership" },
             foci_preferred: this.fociPreferred ?? [],
         };
     }

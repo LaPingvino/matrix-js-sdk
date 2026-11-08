@@ -117,6 +117,19 @@ describe("MembershipManager", () => {
 
     describe("join()", () => {
         describe("sends a membership event", () => {
+            it("advertises the multi_sfu focus selection it joined with, and uses its own focus", async () => {
+                const memberManager = new MembershipManager(undefined, room, client, () => undefined, callSession);
+                memberManager.join([focus], { type: "livekit", focus_selection: "multi_sfu" } as Focus);
+                await waitForMockCall(client.sendStateEvent, Promise.resolve({ event_id: "id" }));
+                expect(client.sendStateEvent).toHaveBeenCalledWith(
+                    room.roomId,
+                    "org.matrix.msc3401.call.member",
+                    expect.objectContaining({ focus_active: { type: "livekit", focus_selection: "multi_sfu" } }),
+                    "_@alice:example.org_AAAAAAA_m.call",
+                );
+                expect(memberManager.getActiveFocus()).toEqual(focus);
+            });
+
             it("sends a membership event and schedules delayed leave when joining a call", async () => {
                 // Spys/Mocks
 

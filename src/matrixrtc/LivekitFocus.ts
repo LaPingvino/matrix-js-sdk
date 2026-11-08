@@ -33,7 +33,12 @@ export const isLivekitFocus = (object: any): object is LivekitFocus =>
 
 export interface LivekitFocusActive extends Focus {
     type: "livekit";
-    focus_selection: "oldest_membership";
+    /**
+     * "multi_sfu" (Element Call's default since v0.21): every member publishes on its own
+     * foci_preferred[0] and subscribes to the others'. "oldest_membership": everyone on the
+     * oldest member's SFU (removed upstream in v44).
+     */
+    focus_selection: "oldest_membership" | "multi_sfu";
 }
 export const isLivekitFocusActive = (object: any): object is LivekitFocusActive =>
     object.type === "livekit" && "focus_selection" in object;
