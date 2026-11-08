@@ -953,7 +953,13 @@ export class SlidingSyncSdk {
         // this session (cold catch-up or cache replay), which is history, not new activity.
         // Keyed off liveSyncedRooms (false only on the first live response), NOT roomData.initial,
         // which Continuwuity also sets when a KNOWN room merely re-enters the window.
-        const firstPaint = !this.liveSyncedRooms.has(room.roomId);
+        // But "first time we see the room this session" alone over-counted history: with conn_id and
+        // a resumed pos, Continuwuity sends nothing for a quiet room, so its first live response can
+        // come hours in and carry a genuinely new message — which then fired with liveEvent:false
+        // (no sound, no notification, no bump). History is a full send (initial) or anything in this
+        // page load's first response (the catch-up; lastPos is set when that response completes).
+        const firstPaint =
+            !this.liveSyncedRooms.has(room.roomId) && (!!roomData.initial || this.lastPos === undefined);
         await this.injectRoomEvents(room, stateEvents, timelineEvents, firstPaint);
 
         // we deliberately don't add ephemeral events to the timeline
