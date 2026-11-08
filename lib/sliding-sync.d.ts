@@ -242,7 +242,6 @@ export declare class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, Sli
     private lists;
     private listModifiedCount;
     private terminated;
-    private needsResend;
     private forceReinit;
     private extensions;
     private desiredRoomSubscriptions;
@@ -252,6 +251,15 @@ export declare class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, Sli
     private pendingReq?;
     private abortController?;
     /**
+     * Set when WE abort the in-flight request (resendInterrupting / stop), so the loop can tell that
+     * apart from the client-side timeout, which also surfaces as an AbortError (fetch.ts). Ours is
+     * retried at once; a timeout is a failure and backs off — retrying it immediately re-triggered
+     * the server's most expensive work against an already struggling homeserver.
+     */
+    private abortedByUs;
+    /** Each list's ranges as first given: what a fresh connection starts from (see shrinkToInitialWindows). */
+    private readonly initialRanges;
+    /**
      * Create a new sliding sync instance
      * @param proxyBaseUrl - The base URL of the sliding sync proxy
      * @param lists - The lists to use for sliding sync.
@@ -260,6 +268,13 @@ export declare class SlidingSync extends TypedEventEmitter<SlidingSyncEvent, Sli
      * @param timeoutMS - The number of milliseconds to wait for a response.
      */
     constructor(proxyBaseUrl: string, lists: Map<string, MSC3575List>, roomSubscriptionInfo: MSC3575RoomSubscription, client: MatrixClient, timeoutMS: number, connId?: string | undefined);
+    /**
+     * A dropped pos means a since=0 request: the server builds every room in the lists' windows from
+     * scratch. Keeping the fully grown windows (~650 rooms) made that one request take minutes after
+     * every server restart (Continuwuity keeps connection state in memory, so a restart expires every
+     * client at once). Start again from the first window; growth regrows it step by step.
+     */
+    private shrinkToInitialWindows;
     /**
      * Convenience factory for the common "I want all my rooms" case, sized to
      * scale to very large accounts. Builds two lists — a dedicated `spaces` list
